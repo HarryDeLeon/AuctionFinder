@@ -5,6 +5,31 @@ Application to find and compare auction items.
 streamlit
 pandas
 
+## Deploy (Streamlit Community Cloud)
+This app is ready to deploy on Streamlit Community Cloud.
+
+### 1) Push this repository to GitHub
+Make sure these files exist in the repo root:
+- `app.py`
+- `requirements.txt`
+- `runtime.txt`
+
+### 2) Create the app in Streamlit Community Cloud
+1. Go to https://share.streamlit.io/
+2. Sign in and click **New app**
+3. Select your GitHub repo and branch
+4. Set **Main file path** to `app.py`
+5. Click **Deploy**
+
+### 3) Private repo notes
+- Private repos are supported.
+- You must connect the GitHub account/org that can access the repository.
+- To let others use the app, share access from Streamlit app settings after deployment.
+
+### 4) Important persistence note
+This project uses local SQLite (`auctionfinder.db`) for watchlist and saved searches.
+For public/shared production usage, move persistence to a managed database (for example PostgreSQL) because local file storage on hosted apps is not ideal for multi-user durability.
+
 ## SQLite note
 No extra installation is required to use SQLite in this project.  
 The app uses Python's built-in `sqlite3` module and creates a local database file (`auctionfinder.db`) in the project folder.
