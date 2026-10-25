@@ -4,7 +4,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from models import AuctionListing
 
@@ -32,8 +32,20 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _table_has_column(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    columns = conn.execute(
+        f"PRAGMA table_info({table_name})"
+    ).fetchall()
+    return any(column[1] == column_name for column in columns)
+
+
 def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS watchlist_entries (
@@ -63,6 +75,82 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auction_sources_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                base_url TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                rate_limit_seconds REAL NOT NULL,
+                crawl_max_pages INTEGER NOT NULL DEFAULT 1,
+                user_agent TEXT NOT NULL,
+                search_path_template TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ingested_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_config_id INTEGER NOT NULL,
+                source_record_id TEXT NOT NULL,
+                item TEXT NOT NULL,
+                category TEXT NOT NULL,
+                auction_house TEXT NOT NULL,
+                status TEXT NOT NULL,
+                price_cad REAL NOT NULL,
+                buyer_premium_percent REAL NOT NULL,
+                shipping_cad REAL NOT NULL,
+                other_fees_cad REAL NOT NULL,
+                tax_percent REAL,
+                description TEXT NOT NULL,
+                location TEXT,
+                listing_url TEXT,
+                lot_number TEXT,
+                sale_date TEXT,
+                currency TEXT NOT NULL,
+                source_name TEXT,
+                raw_url TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                UNIQUE(source_config_id, source_record_id),
+                FOREIGN KEY(source_config_id)
+                    REFERENCES auction_sources_config(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crawl_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_config_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                discovered_count INTEGER NOT NULL DEFAULT 0,
+                inserted_count INTEGER NOT NULL DEFAULT 0,
+                updated_count INTEGER NOT NULL DEFAULT 0,
+                rejected_count INTEGER NOT NULL DEFAULT 0,
+                error_summary TEXT,
+                FOREIGN KEY(source_config_id)
+                    REFERENCES auction_sources_config(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        if not _table_has_column(conn, "auction_sources_config", "crawl_max_pages"):
+            conn.execute(
+                """
+                ALTER TABLE auction_sources_config
+                ADD COLUMN crawl_max_pages INTEGER NOT NULL DEFAULT 1
+                """
+            )
         conn.commit()
 
 
@@ -412,3 +500,467 @@ def import_saved_searches_from_csv(
         imported += 1
 
     return imported
+
+
+def create_source_config(
+    name: str,
+    base_url: str,
+    source_type: str = "dummy",
+    enabled: bool = True,
+    rate_limit_seconds: float = 2.0,
+    crawl_max_pages: int = 1,
+    user_agent: str = "AuctionFinderBot/0.1",
+    search_path_template: Optional[str] = None,
+    notes: str = "",
+    db_path: Path = DEFAULT_DB_PATH,
+) -> int:
+    name_clean = name.strip()
+    base_url_clean = base_url.strip()
+    if not name_clean:
+        raise ValueError("Source name is required")
+    if not base_url_clean:
+        raise ValueError("Source base URL is required")
+    if rate_limit_seconds < 0:
+        raise ValueError("rate_limit_seconds cannot be negative")
+    if crawl_max_pages < 1:
+        raise ValueError("crawl_max_pages must be at least 1")
+
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO auction_sources_config (
+                name,
+                base_url,
+                source_type,
+                enabled,
+                rate_limit_seconds,
+                crawl_max_pages,
+                user_agent,
+                search_path_template,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                name_clean,
+                base_url_clean,
+                source_type.strip() or "dummy",
+                1 if enabled else 0,
+                rate_limit_seconds,
+                crawl_max_pages,
+                user_agent.strip() or "AuctionFinderBot/0.1",
+                search_path_template.strip() if search_path_template else None,
+                notes.strip(),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def list_source_configs(
+    db_path: Path = DEFAULT_DB_PATH,
+) -> List[Dict[str, Any]]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                base_url,
+                source_type,
+                enabled,
+                rate_limit_seconds,
+                crawl_max_pages,
+                user_agent,
+                search_path_template,
+                notes,
+                created_at,
+                updated_at
+            FROM auction_sources_config
+            ORDER BY created_at DESC, name ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_source_config(
+    source_id: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                base_url,
+                source_type,
+                enabled,
+                rate_limit_seconds,
+                crawl_max_pages,
+                user_agent,
+                search_path_template,
+                notes,
+                created_at,
+                updated_at
+            FROM auction_sources_config
+            WHERE id = ?
+            """,
+            (source_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_source_config(
+    source_id: int,
+    name: str,
+    base_url: str,
+    source_type: str,
+    enabled: bool,
+    rate_limit_seconds: float,
+    crawl_max_pages: int,
+    user_agent: str,
+    search_path_template: Optional[str],
+    notes: str,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    if not name.strip():
+        raise ValueError("Source name is required")
+    if not base_url.strip():
+        raise ValueError("Source base URL is required")
+    if rate_limit_seconds < 0:
+        raise ValueError("rate_limit_seconds cannot be negative")
+    if crawl_max_pages < 1:
+        raise ValueError("crawl_max_pages must be at least 1")
+
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE auction_sources_config
+            SET
+                name = ?,
+                base_url = ?,
+                source_type = ?,
+                enabled = ?,
+                rate_limit_seconds = ?,
+                crawl_max_pages = ?,
+                user_agent = ?,
+                search_path_template = ?,
+                notes = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                name.strip(),
+                base_url.strip(),
+                source_type.strip() or "dummy",
+                1 if enabled else 0,
+                rate_limit_seconds,
+                crawl_max_pages,
+                user_agent.strip() or "AuctionFinderBot/0.1",
+                search_path_template.strip() if search_path_template else None,
+                notes.strip(),
+                now,
+                source_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Source config id {source_id} was not found")
+        conn.commit()
+
+
+def delete_source_config(
+    source_id: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.execute(
+            "DELETE FROM auction_sources_config WHERE id = ?",
+            (source_id,),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Source config id {source_id} was not found")
+        conn.commit()
+
+
+def create_crawl_run(
+    source_config_id: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> int:
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO crawl_runs (
+                source_config_id,
+                started_at,
+                status
+            )
+            VALUES (?, ?, ?)
+            """,
+            (source_config_id, now, "running"),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def complete_crawl_run(
+    run_id: int,
+    status: str,
+    discovered_count: int,
+    inserted_count: int,
+    updated_count: int,
+    rejected_count: int,
+    error_summary: Optional[str] = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    if status not in {"success", "partial", "failed"}:
+        raise ValueError("status must be one of: success, partial, failed")
+
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE crawl_runs
+            SET
+                finished_at = ?,
+                status = ?,
+                discovered_count = ?,
+                inserted_count = ?,
+                updated_count = ?,
+                rejected_count = ?,
+                error_summary = ?
+            WHERE id = ?
+            """,
+            (
+                now,
+                status,
+                discovered_count,
+                inserted_count,
+                updated_count,
+                rejected_count,
+                error_summary,
+                run_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Crawl run id {run_id} was not found")
+        conn.commit()
+
+
+def list_recent_crawl_runs(
+    source_config_id: Optional[int] = None,
+    limit: int = 20,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> List[Dict[str, Any]]:
+    query = """
+        SELECT
+            id,
+            source_config_id,
+            started_at,
+            finished_at,
+            status,
+            discovered_count,
+            inserted_count,
+            updated_count,
+            rejected_count,
+            error_summary
+        FROM crawl_runs
+    """
+    params: List[Any] = []
+    if source_config_id is not None:
+        query += " WHERE source_config_id = ?"
+        params.append(source_config_id)
+    query += " ORDER BY started_at DESC LIMIT ?"
+    params.append(limit)
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, tuple(params)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_ingested_listing(
+    source_config_id: int,
+    listing: AuctionListing,
+    raw_url: Optional[str] = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> str:
+    source_record_id = (
+        listing.source_record_id
+        or build_listing_key(listing)
+    )
+    now = _utc_now_iso()
+    sale_date_iso = (
+        listing.sale_date.isoformat()
+        if listing.sale_date is not None
+        else None
+    )
+    existing = None
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM ingested_listings
+            WHERE source_config_id = ? AND source_record_id = ?
+            """,
+            (source_config_id, source_record_id),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO ingested_listings (
+                    source_config_id,
+                    source_record_id,
+                    item,
+                    category,
+                    auction_house,
+                    status,
+                    price_cad,
+                    buyer_premium_percent,
+                    shipping_cad,
+                    other_fees_cad,
+                    tax_percent,
+                    description,
+                    location,
+                    listing_url,
+                    lot_number,
+                    sale_date,
+                    currency,
+                    source_name,
+                    raw_url,
+                    first_seen_at,
+                    last_seen_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    source_config_id,
+                    source_record_id,
+                    listing.item,
+                    listing.category,
+                    listing.auction_house,
+                    listing.status,
+                    listing.price_cad,
+                    listing.buyer_premium_percent,
+                    listing.shipping_cad,
+                    listing.other_fees_cad,
+                    listing.tax_percent,
+                    listing.description,
+                    listing.location,
+                    listing.listing_url,
+                    listing.lot_number,
+                    sale_date_iso,
+                    listing.currency,
+                    listing.source_name,
+                    raw_url,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return "inserted"
+
+        conn.execute(
+            """
+            UPDATE ingested_listings
+            SET
+                item = ?,
+                category = ?,
+                auction_house = ?,
+                status = ?,
+                price_cad = ?,
+                buyer_premium_percent = ?,
+                shipping_cad = ?,
+                other_fees_cad = ?,
+                tax_percent = ?,
+                description = ?,
+                location = ?,
+                listing_url = ?,
+                lot_number = ?,
+                sale_date = ?,
+                currency = ?,
+                source_name = ?,
+                raw_url = ?,
+                last_seen_at = ?
+            WHERE source_config_id = ? AND source_record_id = ?
+            """,
+            (
+                listing.item,
+                listing.category,
+                listing.auction_house,
+                listing.status,
+                listing.price_cad,
+                listing.buyer_premium_percent,
+                listing.shipping_cad,
+                listing.other_fees_cad,
+                listing.tax_percent,
+                listing.description,
+                listing.location,
+                listing.listing_url,
+                listing.lot_number,
+                sale_date_iso,
+                listing.currency,
+                listing.source_name,
+                raw_url,
+                now,
+                source_config_id,
+                source_record_id,
+            ),
+        )
+        conn.commit()
+    return "updated"
+
+
+def list_ingested_listings(
+    source_config_id: Optional[int] = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> List[Dict[str, Any]]:
+    query = """
+        SELECT
+            id,
+            source_config_id,
+            source_record_id,
+            item,
+            category,
+            auction_house,
+            status,
+            price_cad,
+            buyer_premium_percent,
+            shipping_cad,
+            other_fees_cad,
+            tax_percent,
+            description,
+            location,
+            listing_url,
+            lot_number,
+            sale_date,
+            currency,
+            source_name,
+            raw_url,
+            first_seen_at,
+            last_seen_at
+        FROM ingested_listings
+    """
+    params: List[Any] = []
+    if source_config_id is not None:
+        query += " WHERE source_config_id = ?"
+        params.append(source_config_id)
+    query += " ORDER BY last_seen_at DESC"
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, tuple(params)).fetchall()
+    return [dict(row) for row in rows]

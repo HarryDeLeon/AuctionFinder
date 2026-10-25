@@ -1,13 +1,18 @@
 
 import pandas as pd
 import streamlit as st
+from datetime import date, datetime
 from io import StringIO
 
 from auction_sources import load_manual_source_csv_preview_with_report
 from comparables import analyze_listing_against_comparables
 from duplicate_detection import summarize_potential_duplicates
+from ingestion import run_source_crawl
+from models import AuctionListing
 from pricing import calculate_price_breakdown
 from repositories import (
+    create_source_config,
+    delete_source_config,
     delete_saved_search,
     delete_watchlist_entry,
     export_saved_searches_to_csv,
@@ -15,8 +20,12 @@ from repositories import (
     import_saved_searches_from_csv,
     import_watchlist_from_csv,
     initialize_database,
+    list_ingested_listings,
+    list_recent_crawl_runs,
     list_saved_searches,
+    list_source_configs,
     list_watchlist_entries,
+    update_source_config,
     upsert_saved_search,
     upsert_watchlist_entry,
 )
@@ -52,6 +61,43 @@ MANUAL_SOURCE_TEMPLATE_CSV = (
 )
 
 
+def _listing_from_ingested_row(row: dict) -> AuctionListing:
+    sale_date_value = (
+        date.fromisoformat(str(row["sale_date"]))
+        if row.get("sale_date")
+        else None
+    )
+    last_checked = (
+        datetime.fromisoformat(str(row["last_seen_at"]))
+        if row.get("last_seen_at")
+        else None
+    )
+    return AuctionListing(
+        item=str(row["item"]),
+        category=str(row["category"]),
+        auction_house=str(row["auction_house"]),
+        status=str(row["status"]),
+        price_cad=float(row["price_cad"]),
+        buyer_premium_percent=float(row["buyer_premium_percent"]),
+        shipping_cad=float(row["shipping_cad"]),
+        other_fees_cad=float(row["other_fees_cad"]),
+        tax_percent=(
+            float(row["tax_percent"])
+            if row.get("tax_percent") is not None
+            else None
+        ),
+        description=str(row.get("description") or ""),
+        location=row.get("location"),
+        listing_url=row.get("listing_url"),
+        lot_number=row.get("lot_number"),
+        sale_date=sale_date_value,
+        currency=str(row.get("currency") or "CAD"),
+        source_name=row.get("source_name"),
+        source_record_id=row.get("source_record_id"),
+        last_checked_at=last_checked,
+    )
+
+
 st.set_page_config(
     page_title="Antique Auction Finder",
     page_icon="🏺",
@@ -65,13 +111,17 @@ st.write(
 )
 
 st.info(
-    "Prototype mode: all listings are fictional. "
-    "No live auction data is connected."
+    "Prototype mode: sample and ingestion listings are currently "
+    "demonstration data. Live scraping adapters are not connected yet."
 )
 
 initialize_database()
 saved_searches = list_saved_searches()
 watchlist_entries = list_watchlist_entries()
+ingested_listing_rows = list_ingested_listings()
+ingested_listings = [
+    _listing_from_ingested_row(row) for row in ingested_listing_rows
+]
 if "imported_source_listings" not in st.session_state:
     st.session_state["imported_source_listings"] = []
 if "show_import_preview" not in st.session_state:
@@ -92,9 +142,11 @@ search = st.text_input(
     key="search_keyword",
 )
 
-categories = ["All"] + sorted(
-    {listing.category for listing in AUCTIONS}
-)
+all_categories = {
+    listing.category
+    for listing in (AUCTIONS + ingested_listings)
+}
+categories = ["All"] + sorted(all_categories)
 category = st.selectbox(
     "Category",
     categories,
@@ -141,6 +193,10 @@ sort_desc = sort_col2.checkbox(
 )
 
 with st.sidebar:
+    html_recommended_base_url = "https://www.liveauctionworld.com/auctionlist.aspx"
+    html_recommended_search_template = "/search.aspx"
+    html_recommended_max_pages = 2
+
     st.header("Saved searches")
     save_search_name = st.text_input(
         "Saved search name",
@@ -207,6 +263,303 @@ with st.sidebar:
             delete_saved_search(selected_saved_search)
             st.success(f"Deleted '{selected_saved_search}'.")
             st.rerun()
+
+    st.divider()
+    st.subheader("Auction source registry (prototype)")
+    st.caption(
+        "Configure source records and run a dummy crawl to validate the "
+        "new ingestion pipeline foundation."
+    )
+
+    with st.form("source_add_form"):
+        st.write("**Add source**")
+        add_source_type = st.selectbox(
+            "Source type",
+            options=["dummy", "html", "api", "rss"],
+            index=0,
+        )
+        default_base_url = (
+            html_recommended_base_url
+            if add_source_type == "html"
+            else "https://www.liveauctionworld.com/"
+        )
+        default_search_template = (
+            html_recommended_search_template
+            if add_source_type == "html"
+            else ""
+        )
+        default_max_pages = (
+            html_recommended_max_pages
+            if add_source_type == "html"
+            else 1
+        )
+        add_name = st.text_input(
+            "Source name",
+            value="LiveAuctionWorld",
+        )
+        add_base_url = st.text_input(
+            "Base URL",
+            value=default_base_url,
+        )
+        add_enabled = st.checkbox("Enabled", value=True)
+        add_rate_limit = st.number_input(
+            "Rate limit seconds",
+            min_value=0.0,
+            value=2.0,
+            step=0.5,
+        )
+        add_crawl_max_pages = st.number_input(
+            "Max pages per crawl",
+            min_value=1,
+            value=default_max_pages,
+            step=1,
+        )
+        add_user_agent = st.text_input(
+            "User agent",
+            value="AuctionFinderBot/0.1",
+        )
+        add_search_template = st.text_input(
+            "Search path template (optional)",
+            value=default_search_template,
+            placeholder="/search?q={query}",
+        )
+        if add_source_type == "html":
+            st.caption(
+                "Recommended HTML source defaults applied: "
+                "auction list base URL, /search.aspx template, and max pages = 2."
+            )
+        add_notes = st.text_area("Notes", value="")
+        add_submit = st.form_submit_button("Add source")
+        if add_submit:
+            try:
+                create_source_config(
+                    name=add_name,
+                    base_url=add_base_url,
+                    source_type=add_source_type,
+                    enabled=add_enabled,
+                    rate_limit_seconds=add_rate_limit,
+                    crawl_max_pages=int(add_crawl_max_pages),
+                    user_agent=add_user_agent,
+                    search_path_template=add_search_template or None,
+                    notes=add_notes,
+                )
+                st.success("Source added.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    source_configs = list_source_configs()
+    recent_runs = list_recent_crawl_runs(limit=200)
+    latest_run_by_source = {}
+    for run in recent_runs:
+        source_id = int(run["source_config_id"])
+        if source_id not in latest_run_by_source:
+            latest_run_by_source[source_id] = run
+
+    if source_configs:
+        display_rows = [
+            {
+                "ID": row["id"],
+                "Name": row["name"],
+                "Base URL": row["base_url"],
+                "Type": row["source_type"],
+                "Enabled": bool(row["enabled"]),
+                "Rate limit (s)": row["rate_limit_seconds"],
+                "Max pages": row["crawl_max_pages"],
+                "Last status": (
+                    latest_run_by_source.get(int(row["id"]), {}).get("status")
+                    or "Never run"
+                ),
+                "Last finished": latest_run_by_source.get(
+                    int(row["id"]), {}
+                ).get("finished_at"),
+                "Last error": latest_run_by_source.get(
+                    int(row["id"]), {}
+                ).get("error_summary"),
+            }
+            for row in source_configs
+        ]
+        st.dataframe(
+            pd.DataFrame(display_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        source_options = {
+            f"{row['name']} (#{row['id']})": int(row["id"])
+            for row in source_configs
+        }
+        selected_source_label = st.selectbox(
+            "Select source to edit",
+            options=list(source_options.keys()),
+            key="selected_source_config",
+        )
+        selected_source_id = source_options[selected_source_label]
+        selected_source = next(
+            row
+            for row in source_configs
+            if int(row["id"]) == selected_source_id
+        )
+
+        with st.form("source_edit_form"):
+            st.write("**Edit source**")
+            edit_name = st.text_input(
+                "Source name",
+                value=selected_source["name"],
+            )
+            edit_base_url = st.text_input(
+                "Base URL",
+                value=selected_source["base_url"],
+            )
+            type_options = ["dummy", "html", "api", "rss"]
+            selected_type = selected_source["source_type"]
+            edit_type_index = (
+                type_options.index(selected_type)
+                if selected_type in type_options
+                else 0
+            )
+            edit_source_type = st.selectbox(
+                "Source type",
+                options=type_options,
+                index=edit_type_index,
+            )
+            edit_enabled = st.checkbox(
+                "Enabled",
+                value=bool(selected_source["enabled"]),
+            )
+            edit_rate_limit = st.number_input(
+                "Rate limit seconds",
+                min_value=0.0,
+                value=float(selected_source["rate_limit_seconds"]),
+                step=0.5,
+            )
+            edit_crawl_max_pages = st.number_input(
+                "Max pages per crawl",
+                min_value=1,
+                value=int(selected_source.get("crawl_max_pages") or 1),
+                step=1,
+            )
+            edit_user_agent = st.text_input(
+                "User agent",
+                value=selected_source["user_agent"],
+            )
+            edit_search_template = st.text_input(
+                "Search path template (optional)",
+                value=selected_source["search_path_template"] or "",
+            )
+            edit_notes = st.text_area(
+                "Notes",
+                value=selected_source["notes"] or "",
+            )
+            if edit_source_type == "html":
+                st.caption(
+                    "Tip: for LiveAuctionWorld HTML sources, use "
+                    "https://www.liveauctionworld.com/auctionlist.aspx, "
+                    "search template /search.aspx, and max pages around 2-3."
+                )
+            edit_save_col, edit_defaults_col = st.columns(2)
+            edit_submit = edit_save_col.form_submit_button("Save source changes")
+            apply_html_defaults_submit = edit_defaults_col.form_submit_button(
+                "Apply recommended HTML defaults"
+            )
+            if edit_submit:
+                try:
+                    update_source_config(
+                        source_id=selected_source_id,
+                        name=edit_name,
+                        base_url=edit_base_url,
+                        source_type=edit_source_type,
+                        enabled=edit_enabled,
+                        rate_limit_seconds=edit_rate_limit,
+                        crawl_max_pages=int(edit_crawl_max_pages),
+                        user_agent=edit_user_agent,
+                        search_path_template=edit_search_template or None,
+                        notes=edit_notes,
+                    )
+                    st.success("Source updated.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+            if apply_html_defaults_submit:
+                if edit_source_type != "html":
+                    st.info(
+                        "Recommended defaults apply to HTML sources only. "
+                        "Set source type to html first."
+                    )
+                else:
+                    try:
+                        update_source_config(
+                            source_id=selected_source_id,
+                            name=edit_name,
+                            base_url=html_recommended_base_url,
+                            source_type="html",
+                            enabled=edit_enabled,
+                            rate_limit_seconds=edit_rate_limit,
+                            crawl_max_pages=html_recommended_max_pages,
+                            user_agent=edit_user_agent,
+                            search_path_template=html_recommended_search_template,
+                            notes=edit_notes,
+                        )
+                        st.success(
+                            "Applied recommended HTML defaults "
+                            "(base URL, search template, and max pages)."
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+        source_action_col1, source_action_col2 = st.columns(2)
+        if source_action_col1.button("Run selected source crawl"):
+            crawl_summary = run_source_crawl(selected_source_id)
+            if crawl_summary.status == "success":
+                st.success(
+                    "Crawl completed. "
+                    f"Discovered {crawl_summary.discovered_count}, "
+                    f"inserted {crawl_summary.inserted_count}, "
+                    f"updated {crawl_summary.updated_count}."
+                )
+            elif crawl_summary.status == "partial":
+                st.warning(
+                    "Crawl completed with partial failures. "
+                    f"Rejected {crawl_summary.rejected_count}. "
+                    f"Error: {crawl_summary.error_summary}"
+                )
+            else:
+                st.error(f"Crawl failed: {crawl_summary.error_summary}")
+            st.rerun()
+
+        if source_action_col2.button("Delete selected source"):
+            try:
+                delete_source_config(selected_source_id)
+                st.success("Source deleted.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    else:
+        st.caption("No sources configured yet.")
+
+    recent_runs = list_recent_crawl_runs(limit=10)
+    if recent_runs:
+        runs_df = pd.DataFrame(recent_runs).rename(
+            columns={
+                "id": "Run ID",
+                "source_config_id": "Source ID",
+                "started_at": "Started",
+                "finished_at": "Finished",
+                "status": "Status",
+                "discovered_count": "Discovered",
+                "inserted_count": "Inserted",
+                "updated_count": "Updated",
+                "rejected_count": "Rejected",
+                "error_summary": "Error summary",
+            }
+        )
+        st.write("**Recent crawl runs**")
+        st.dataframe(
+            runs_df,
+            use_container_width=True,
+            hide_index=True,
+        )
 
     st.divider()
     st.subheader("CSV import/export")
@@ -400,7 +753,11 @@ with st.sidebar:
 # Filter and sort the listings
 min_price = min_price_cad if min_price_cad > 0 else None
 max_price = max_price_cad_raw if max_price_cad_raw > 0 else None
-all_listings = AUCTIONS + st.session_state["imported_source_listings"]
+all_listings = (
+    AUCTIONS
+    + st.session_state["imported_source_listings"]
+    + ingested_listings
+)
 
 filtered = search_listings(
     listings=all_listings,

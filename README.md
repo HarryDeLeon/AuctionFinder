@@ -52,6 +52,11 @@ The app uses Python's built-in `sqlite3` module and creates a local database fil
 - The app includes a prototype "Manual source import preview" toggle (sidebar) to validate and temporarily preview normalized source rows in-session.
 - The manual import preview includes in-app CSV requirements help and a downloadable template.
 - Manual preview imports now return a valid/rejected row summary and provide a downloadable rejected-rows CSV for correction workflows.
+- A prototype auction source registry allows users to add/edit/delete source configurations in the sidebar.
+- A Sprint 1 ingestion skeleton is included with crawl-run tracking and a `dummy` adapter to validate persistence and pipeline flow.
+- Sprint 2 adds a first HTML adapter for LiveAuctionWorld (`source_type=html`) with URL/domain guardrails and parser fallbacks (JSON-LD first, then listing-link extraction).
+- Sprint 3 hardening adds retry/backoff fetching for LiveAuctionWorld HTML, parser fixture coverage under `tests/fixtures/`, and richer source telemetry in the sidebar (last crawl status/finished time/error).
+- Sprint 4 adds LiveAuctionWorld structure-aware extraction for auction cards and lot grid entries (including lot number, auctioneer, description, bid text parsing), plus controlled pagination via per-source `crawl_max_pages`.
 
 All listings are currently fictional sample data.
 
