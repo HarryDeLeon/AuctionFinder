@@ -5,6 +5,8 @@ from pathlib import Path
 from auction_sources.liveauctionworld_html_source import LiveAuctionWorldHtmlAdapter
 from ingestion import run_source_crawl
 from ingestion import ADAPTER_REGISTRY
+from ingestion import run_source_keyword_crawl
+from models import AuctionListing
 from repositories import (
     create_source_config,
     initialize_database,
@@ -82,6 +84,48 @@ class IngestionTests(unittest.TestCase):
         rows = list_ingested_listings(source_id, db_path=self.db_path)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["item"] in {"Blue Vase", "Silver Bowl"}, True)
+
+    def test_keyword_crawl_uses_adapter_keyword_method(self):
+        class KeywordAdapter:
+            def crawl_latest(self, source_config):
+                return []
+
+            def crawl_keyword(self, source_config, keyword):
+                return [
+                    AuctionListing(
+                        item=f"{keyword} example listing",
+                        category="Auction lot",
+                        auction_house="LiveAuctionWorld",
+                        status="Active",
+                        price_cad=0.0,
+                        buyer_premium_percent=0.0,
+                        shipping_cad=0.0,
+                        description="keyword match",
+                        listing_url="https://www.liveauctionworld.com/example_i1",
+                        source_name="LiveAuctionWorld",
+                        source_record_id="1",
+                    )
+                ]
+
+        original_adapter = ADAPTER_REGISTRY["html"]
+        ADAPTER_REGISTRY["html"] = KeywordAdapter()
+        try:
+            source_id = create_source_config(
+                name="LiveAuctionWorld",
+                base_url="https://www.liveauctionworld.com/",
+                source_type="html",
+                db_path=self.db_path,
+            )
+            summary = run_source_keyword_crawl(
+                source_id,
+                keyword="rifle",
+                db_path=self.db_path,
+            )
+        finally:
+            ADAPTER_REGISTRY["html"] = original_adapter
+
+        self.assertEqual(summary.status, "success")
+        self.assertEqual(summary.discovered_count, 1)
 
 
 if __name__ == "__main__":

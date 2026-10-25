@@ -8,6 +8,7 @@ from auction_sources import load_manual_source_csv_preview_with_report
 from comparables import analyze_listing_against_comparables
 from duplicate_detection import summarize_potential_duplicates
 from ingestion import run_source_crawl
+from ingestion import run_source_keyword_crawl
 from models import AuctionListing
 from pricing import calculate_price_breakdown
 from repositories import (
@@ -238,6 +239,62 @@ sort_desc = sort_col2.checkbox(
     "Descending",
     value=st.session_state.get("sort_desc", False),
     key="sort_desc",
+)
+
+search_action_col1, search_action_col2 = st.columns(2)
+if search_action_col1.button("Search web source now"):
+    normalized_search = search.strip()
+    if not normalized_search:
+        st.info("Enter a keyword first (for example: rifle).")
+    else:
+        available_html_sources = [
+            source
+            for source in list_source_configs()
+            if bool(source["enabled"]) and source["source_type"] == "html"
+        ]
+        if not available_html_sources:
+            st.error(
+                "No enabled HTML sources are configured. "
+                "Add or enable an HTML source in the sidebar first."
+            )
+        else:
+            total_discovered = 0
+            total_inserted = 0
+            total_updated = 0
+            source_errors = []
+            for source in available_html_sources:
+                summary = run_source_keyword_crawl(
+                    source_config_id=int(source["id"]),
+                    keyword=normalized_search,
+                )
+                total_discovered += summary.discovered_count
+                total_inserted += summary.inserted_count
+                total_updated += summary.updated_count
+                if summary.status != "success" and summary.error_summary:
+                    source_errors.append(
+                        f"{source['name']}: {summary.error_summary}"
+                    )
+
+            if total_discovered > 0:
+                st.success(
+                    "Web keyword crawl complete. "
+                    f"Matched {total_discovered} item(s); "
+                    f"inserted {total_inserted}, updated {total_updated}."
+                )
+            else:
+                st.warning(
+                    "Web crawl completed but found no keyword matches. "
+                    "Try increasing max pages in source settings."
+                )
+
+            if source_errors:
+                st.warning("Some sources reported issues:")
+                for source_error in source_errors:
+                    st.caption(f"- {source_error}")
+            st.rerun()
+
+search_action_col2.caption(
+    "Runs a live keyword crawl against enabled HTML sources and stores matches."
 )
 
 with st.sidebar:

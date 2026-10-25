@@ -170,6 +170,28 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
         self.assertEqual(listing.category, "Firearms & Military")
         self.assertIn("_i61264155", listing.listing_url or "")
 
+    def test_keyword_crawl_filters_results(self):
+        html_text = self._load_fixture("liveauctionworld_auction_detail_page1.html")
+        adapter = LiveAuctionWorldHtmlAdapter(
+            fetcher=lambda url, user_agent, timeout_seconds: html_text,
+            sleeper=lambda _: None,
+        )
+        listings = adapter.crawl_keyword(
+            {
+                "id": 1,
+                "name": "LiveAuctionWorld",
+                "base_url": "https://www.liveauctionworld.com/",
+                "source_type": "html",
+                "rate_limit_seconds": 0.1,
+                "crawl_max_pages": 1,
+                "search_path_template": "https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+                "user_agent": "AuctionFinderBot/0.1",
+            },
+            keyword="vase",
+        )
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(listings[0].item, "Blue Vase")
+
 
 if __name__ == "__main__":
     unittest.main()

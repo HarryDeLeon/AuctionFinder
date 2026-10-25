@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from auction_sources.liveauctionworld_html_source import LiveAuctionWorldHtmlAdapter
 from models import AuctionListing
@@ -54,8 +54,9 @@ ADAPTER_REGISTRY = {
 }
 
 
-def run_source_crawl(
+def _run_source_crawl_internal(
     source_config_id: int,
+    keyword: Optional[str] = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> CrawlSummary:
     source_config = get_source_config(source_config_id, db_path=db_path)
@@ -94,7 +95,10 @@ def run_source_crawl(
         )
 
     try:
-        listings = adapter.crawl_latest(source_config)
+        if keyword and hasattr(adapter, "crawl_keyword"):
+            listings = adapter.crawl_keyword(source_config, keyword)
+        else:
+            listings = adapter.crawl_latest(source_config)
         discovered_count = len(listings)
         for listing in listings:
             result = upsert_ingested_listing(
@@ -136,4 +140,30 @@ def run_source_crawl(
         updated_count=updated_count,
         rejected_count=rejected_count,
         error_summary=error_summary,
+    )
+
+
+def run_source_crawl(
+    source_config_id: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> CrawlSummary:
+    return _run_source_crawl_internal(
+        source_config_id=source_config_id,
+        keyword=None,
+        db_path=db_path,
+    )
+
+
+def run_source_keyword_crawl(
+    source_config_id: int,
+    keyword: str,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> CrawlSummary:
+    normalized = keyword.strip()
+    if not normalized:
+        raise ValueError("Keyword is required for source keyword crawl.")
+    return _run_source_crawl_internal(
+        source_config_id=source_config_id,
+        keyword=normalized,
+        db_path=db_path,
     )

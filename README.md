@@ -57,6 +57,7 @@ The app uses Python's built-in `sqlite3` module and creates a local database fil
 - Sprint 2 adds a first HTML adapter for LiveAuctionWorld (`source_type=html`) with URL/domain guardrails and parser fallbacks (JSON-LD first, then listing-link extraction).
 - Sprint 3 hardening adds retry/backoff fetching for LiveAuctionWorld HTML, parser fixture coverage under `tests/fixtures/`, and richer source telemetry in the sidebar (last crawl status/finished time/error).
 - Sprint 4 adds LiveAuctionWorld structure-aware extraction for auction cards and lot grid entries (including lot number, auctioneer, description, bid text parsing), plus controlled pagination via per-source `crawl_max_pages`.
+- The main page now supports on-demand keyword web crawl ("Search web source now"), which runs a live crawl for the typed keyword across enabled HTML sources and stores matching results locally.
 
 All listings are currently fictional sample data.
 

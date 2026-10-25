@@ -5,7 +5,7 @@ import time
 from html import unescape
 from typing import Dict, Iterable, List
 from urllib.error import URLError
-from urllib.parse import urljoin
+from urllib.parse import quote_plus, urljoin
 from urllib.request import Request, urlopen
 
 from models import AuctionListing
@@ -478,15 +478,26 @@ class LiveAuctionWorldHtmlAdapter:
         self._fetcher = fetcher
         self._sleeper = sleeper
 
-    def _resolve_crawl_url(self, source_config: Dict[str, object]) -> str:
+    def _resolve_crawl_url(
+        self,
+        source_config: Dict[str, object],
+        keyword: str | None = None,
+    ) -> str:
         base_url = str(source_config["base_url"]).strip()
         template = str(source_config.get("search_path_template") or "").strip()
         if not template:
+            if keyword:
+                query = quote_plus(keyword)
+                connector = "&" if "?" in base_url else "?"
+                return f"{base_url}{connector}txtSearch={query}"
             return base_url
         if "{query}" in template:
-            template = template.replace("{query}", "antique")
+            template = template.replace("{query}", quote_plus(keyword or "antique"))
         if "{page}" in template:
             template = template.replace("{page}", "1")
+        if keyword and "{query}" not in str(source_config.get("search_path_template") or ""):
+            connector = "&" if "?" in template else "?"
+            template = f"{template}{connector}txtSearch={quote_plus(keyword)}"
         return urljoin(base_url, template)
 
     def _fetch_with_retry(
@@ -537,14 +548,18 @@ class LiveAuctionWorldHtmlAdapter:
             self._sleeper(rate_limit_seconds)
         return html_text
 
-    def crawl_latest(self, source_config: Dict[str, object]) -> List[AuctionListing]:
+    def crawl_latest(
+        self,
+        source_config: Dict[str, object],
+        keyword: str | None = None,
+    ) -> List[AuctionListing]:
         base_url = str(source_config["base_url"]).strip()
         if "liveauctionworld.com" not in base_url.lower():
             raise ValueError(
                 "LiveAuctionWorld HTML adapter only supports liveauctionworld.com URLs."
             )
 
-        crawl_url = self._resolve_crawl_url(source_config)
+        crawl_url = self._resolve_crawl_url(source_config, keyword=keyword)
         user_agent = (
             str(source_config.get("user_agent") or "").strip()
             or "AuctionFinderBot/0.1"
@@ -629,3 +644,39 @@ class LiveAuctionWorldHtmlAdapter:
                 "No listing records could be parsed from the fetched HTML."
             )
         return results
+
+    def crawl_keyword(
+        self,
+        source_config: Dict[str, object],
+        keyword: str,
+    ) -> List[AuctionListing]:
+        normalized_keyword = keyword.strip().lower()
+        if not normalized_keyword:
+            raise ValueError("Keyword is required for keyword crawl.")
+
+        listings = self.crawl_latest(
+            {
+                **source_config,
+                "search_path_template": (
+                    str(source_config.get("search_path_template") or "").strip()
+                    or "/search.aspx?txtSearch={query}"
+                ),
+            },
+            keyword=keyword,
+        )
+
+        matches = [
+            listing
+            for listing in listings
+            if normalized_keyword in (
+                f"{listing.item} {listing.description}".lower()
+            )
+        ]
+
+        if matches:
+            return matches
+
+        raise ValueError(
+            "Search crawl produced no keyword matches. "
+            "Try increasing max pages or using a broader term."
+        )
