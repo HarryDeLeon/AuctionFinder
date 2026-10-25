@@ -171,9 +171,39 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
         self.assertIn("_i61264155", listing.listing_url or "")
 
     def test_keyword_crawl_filters_results(self):
-        html_text = self._load_fixture("liveauctionworld_auction_detail_page1.html")
+        payload = {
+            "ItemResults": [
+                {
+                    "ItemID": 1001,
+                    "ItemTitle": "Blue Vase",
+                    "ItemDescription": "Hand-painted porcelain",
+                    "ItemCategoryName": ["Auction lot"],
+                    "AuctioneerName": "House Alpha",
+                    "AuctionCity": "Vancouver",
+                    "AuctionProvince": "BC",
+                    "AuctionCountry": "Canada",
+                    "ItemLot": "1",
+                    "ItemCurrentBidAmount": 120.0,
+                    "ItemSold": 0,
+                },
+                {
+                    "ItemID": 1002,
+                    "ItemTitle": "Silver Bowl",
+                    "ItemDescription": "Sterling bowl",
+                    "ItemCategoryName": ["Auction lot"],
+                    "AuctioneerName": "House Alpha",
+                    "AuctionCity": "Vancouver",
+                    "AuctionProvince": "BC",
+                    "AuctionCountry": "Canada",
+                    "ItemLot": "2",
+                    "ItemCurrentBidAmount": 200.0,
+                    "ItemSold": 0,
+                },
+            ]
+        }
         adapter = LiveAuctionWorldHtmlAdapter(
-            fetcher=lambda url, user_agent, timeout_seconds: html_text,
+            fetcher=lambda url, user_agent, timeout_seconds: "",
+            json_fetcher=lambda url, user_agent, timeout_seconds: payload,
             sleeper=lambda _: None,
         )
         listings = adapter.crawl_keyword(
@@ -184,7 +214,7 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
                 "source_type": "html",
                 "rate_limit_seconds": 0.1,
                 "crawl_max_pages": 1,
-                "search_path_template": "https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+                "search_path_template": "/search.aspx",
                 "user_agent": "AuctionFinderBot/0.1",
             },
             keyword="vase",

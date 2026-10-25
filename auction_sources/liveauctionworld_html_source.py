@@ -5,7 +5,7 @@ import time
 from html import unescape
 from typing import Dict, Iterable, List
 from urllib.error import URLError
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urlencode, urljoin
 from urllib.request import Request, urlopen
 
 from models import AuctionListing
@@ -473,9 +473,32 @@ def fetch_html_document(
     return content.decode("utf-8", errors="replace")
 
 
+def fetch_json_document(
+    url: str,
+    user_agent: str,
+    timeout_seconds: float = 20.0,
+) -> Dict[str, object]:
+    timeout = max(timeout_seconds, 1.0)
+    request = Request(
+        url=url,
+        headers={"User-Agent": user_agent},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        content = response.read()
+    decoded = content.decode("utf-8", errors="replace")
+    return json.loads(decoded)
+
+
 class LiveAuctionWorldHtmlAdapter:
-    def __init__(self, fetcher=fetch_html_document, sleeper=time.sleep):
+    def __init__(
+        self,
+        fetcher=fetch_html_document,
+        json_fetcher=fetch_json_document,
+        sleeper=time.sleep,
+    ):
         self._fetcher = fetcher
+        self._json_fetcher = json_fetcher
         self._sleeper = sleeper
 
     def _resolve_crawl_url(
@@ -653,26 +676,107 @@ class LiveAuctionWorldHtmlAdapter:
         normalized_keyword = keyword.strip().lower()
         if not normalized_keyword:
             raise ValueError("Keyword is required for keyword crawl.")
-
-        listings = self.crawl_latest(
-            {
-                **source_config,
-                "search_path_template": (
-                    str(source_config.get("search_path_template") or "").strip()
-                    or "/search.aspx?txtSearch={query}"
-                ),
-            },
-            keyword=keyword,
+        base_url = str(source_config["base_url"]).strip()
+        user_agent = (
+            str(source_config.get("user_agent") or "").strip()
+            or "AuctionFinderBot/0.1"
         )
+        rate_limit_seconds = max(float(source_config.get("rate_limit_seconds") or 2.0), 0.0)
+        timeout_seconds = max(rate_limit_seconds * 5, 10.0)
+        max_pages = max(int(source_config.get("crawl_max_pages") or 1), 1)
+        source_name = str(source_config["name"])
+
+        all_results: List[AuctionListing] = []
+        seen_ids = set()
+        for page_number in range(1, max_pages + 1):
+            query_params = {
+                "command": "searchitems",
+                "unitsPerPage": 100,
+                "page": page_number,
+                "isCurrent": 1,
+                "keywords": keyword,
+                "siteID": 6,
+                "categoryID": "",
+                "auctionSessionTypeID": "",
+                "countryLocationID": "",
+                "auctioneerID": "",
+                "yearID": "",
+                "registrantID": "",
+                "exactKeywords": 0,
+                "sortBy": 4,
+                "searchFields": 0,
+                "hasImage": 0,
+            }
+            query_string = urlencode(query_params)
+            endpoint = urljoin(
+                base_url,
+                f"handlers/controls/CloudsearchItemSearch.ashx?{query_string}",
+            )
+            payload = self._json_fetcher(endpoint, user_agent, timeout_seconds)
+            item_results = payload.get("ItemResults")
+            if not isinstance(item_results, list):
+                raise ValueError("Keyword search endpoint returned an invalid payload.")
+            if not item_results:
+                if page_number == 1:
+                    break
+                continue
+
+            for row in item_results:
+                if not isinstance(row, dict):
+                    continue
+                item_id = row.get("ItemID")
+                item_title = str(row.get("ItemTitle") or "").strip()
+                if not item_id or not item_title:
+                    continue
+                source_record_id = str(item_id)
+                if source_record_id in seen_ids:
+                    continue
+                seen_ids.add(source_record_id)
+
+                category = "Auction lot"
+                category_values = row.get("ItemCategoryName")
+                if isinstance(category_values, list) and category_values:
+                    category = str(category_values[0] or "").strip() or category
+                elif row.get("ItemCategoryName"):
+                    category = str(row.get("ItemCategoryName")).strip() or category
+
+                location_parts = [
+                    str(row.get("AuctionCity") or "").strip(),
+                    str(row.get("AuctionProvince") or "").strip(),
+                    str(row.get("AuctionCountry") or "").strip(),
+                ]
+                location = ", ".join([part for part in location_parts if part]) or None
+
+                lot_number = str(row.get("ItemLot") or "").strip() or None
+                listing_url = urljoin(base_url, f"item.aspx?i={item_id}")
+                price_cad = _safe_float(row.get("ItemCurrentBidAmount"))
+                status = "Sold" if int(row.get("ItemSold") or 0) == 1 else "Active"
+
+                listing = AuctionListing(
+                    item=item_title,
+                    category=category,
+                    auction_house=str(row.get("AuctioneerName") or source_name).strip() or source_name,
+                    status=status,
+                    price_cad=max(price_cad, 0.0),
+                    buyer_premium_percent=0.0,
+                    shipping_cad=0.0,
+                    description=str(row.get("ItemDescription") or "").strip(),
+                    location=location,
+                    listing_url=listing_url,
+                    lot_number=lot_number,
+                    source_name=source_name,
+                    source_record_id=source_record_id,
+                )
+                all_results.append(listing)
+
+            if rate_limit_seconds > 0:
+                self._sleeper(rate_limit_seconds)
 
         matches = [
             listing
-            for listing in listings
-            if normalized_keyword in (
-                f"{listing.item} {listing.description}".lower()
-            )
+            for listing in all_results
+            if normalized_keyword in f"{listing.item} {listing.description}".lower()
         ]
-
         if matches:
             return matches
 

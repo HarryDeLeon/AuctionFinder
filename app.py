@@ -60,6 +60,9 @@ MANUAL_SOURCE_TEMPLATE_CSV = (
     "Active,275,22,40,Hand-painted floral vase,Vancouver BC,"
     "https://example.com/listings/demo-1,12,2026-10-25,0,5\n"
 )
+HTML_RECOMMENDED_BASE_URL = "https://www.liveauctionworld.com/auctionlist.aspx"
+HTML_RECOMMENDED_SEARCH_TEMPLATE = "/search.aspx"
+HTML_RECOMMENDED_MAX_PAGES = 2
 
 
 def _listing_from_ingested_row(row: dict) -> AuctionListing:
@@ -253,11 +256,34 @@ if search_action_col1.button("Search web source now"):
             if bool(source["enabled"]) and source["source_type"] == "html"
         ]
         if not available_html_sources:
-            st.error(
-                "No enabled HTML sources are configured. "
-                "Add or enable an HTML source in the sidebar first."
-            )
-        else:
+            try:
+                created_source_id = create_source_config(
+                    name="LiveAuctionWorld",
+                    base_url=HTML_RECOMMENDED_BASE_URL,
+                    source_type="html",
+                    enabled=True,
+                    rate_limit_seconds=2.0,
+                    crawl_max_pages=HTML_RECOMMENDED_MAX_PAGES,
+                    user_agent="AuctionFinderBot/0.1",
+                    search_path_template=HTML_RECOMMENDED_SEARCH_TEMPLATE,
+                    notes="Auto-created from web keyword search action.",
+                )
+                available_html_sources = [
+                    source
+                    for source in list_source_configs()
+                    if int(source["id"]) == created_source_id
+                ]
+                st.info(
+                    "No enabled HTML source existed. "
+                    "Created a default LiveAuctionWorld source and running it now."
+                )
+            except ValueError as exc:
+                st.error(
+                    "No enabled HTML sources are configured and automatic "
+                    f"source creation failed: {exc}"
+                )
+                available_html_sources = []
+        if available_html_sources:
             total_discovered = 0
             total_inserted = 0
             total_updated = 0
@@ -298,10 +324,6 @@ search_action_col2.caption(
 )
 
 with st.sidebar:
-    html_recommended_base_url = "https://www.liveauctionworld.com/auctionlist.aspx"
-    html_recommended_search_template = "/search.aspx"
-    html_recommended_max_pages = 2
-
     st.header("Saved searches")
     save_search_name = st.text_input(
         "Saved search name",
@@ -378,17 +400,17 @@ with st.sidebar:
             index=0,
         )
         default_base_url = (
-            html_recommended_base_url
+            HTML_RECOMMENDED_BASE_URL
             if add_source_type == "html"
             else "https://www.liveauctionworld.com/"
         )
         default_search_template = (
-            html_recommended_search_template
+            HTML_RECOMMENDED_SEARCH_TEMPLATE
             if add_source_type == "html"
             else ""
         )
         default_max_pages = (
-            html_recommended_max_pages
+            HTML_RECOMMENDED_MAX_PAGES
             if add_source_type == "html"
             else 1
         )
@@ -590,13 +612,13 @@ with st.sidebar:
                         update_source_config(
                             source_id=selected_source_id,
                             name=edit_name,
-                            base_url=html_recommended_base_url,
+                            base_url=HTML_RECOMMENDED_BASE_URL,
                             source_type="html",
                             enabled=edit_enabled,
                             rate_limit_seconds=edit_rate_limit,
-                            crawl_max_pages=html_recommended_max_pages,
+                            crawl_max_pages=HTML_RECOMMENDED_MAX_PAGES,
                             user_agent=edit_user_agent,
-                            search_path_template=html_recommended_search_template,
+                            search_path_template=HTML_RECOMMENDED_SEARCH_TEMPLATE,
                             notes=edit_notes,
                         )
                         st.success(
