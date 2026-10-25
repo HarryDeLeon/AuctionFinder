@@ -298,6 +298,104 @@ def _extract_grid_lots(
     return results
 
 
+def _extract_item_detail_page(
+    html_text: str,
+    source_name: str,
+    base_url: str,
+) -> List[AuctionListing]:
+    canonical_match = re.search(
+        r"<link rel=[\"']canonical[\"'] href=[\"']([^\"']+_i\d+)[\"']",
+        html_text,
+        re.IGNORECASE,
+    )
+    if not canonical_match:
+        canonical_match = re.search(
+            r"Contents of\s+(https?://[^\s]+_i\d+)",
+            html_text,
+            re.IGNORECASE,
+        )
+    if not canonical_match:
+        return []
+
+    listing_url = canonical_match.group(1).strip()
+    title = ""
+    auction_house = source_name
+    meta_description_match = re.search(
+        r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
+        html_text,
+        re.IGNORECASE,
+    )
+    if meta_description_match:
+        description_content = _clean_text(meta_description_match.group(1))
+        if " - " in description_content:
+            title_part, auction_part = description_content.rsplit(" - ", 1)
+            title = title_part.strip()
+            if auction_part.strip():
+                auction_house = auction_part.strip()
+        else:
+            title = description_content
+
+    if not title:
+        title_match = re.search(
+            r"<title>\s*(.*?)\s*</title>",
+            html_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if title_match:
+            title = _clean_text(title_match.group(1))
+
+    if not title:
+        return []
+
+    category = "Auction lot"
+    category_match = re.search(
+        r'\$\("#lblCategory"\)\.text\("([^"]+)"\)',
+        html_text,
+        re.IGNORECASE,
+    )
+    if category_match:
+        category = _clean_text(category_match.group(1)) or category
+
+    keywords_match = re.search(
+        r'<meta[^>]*name=["\']keywords["\'][^>]*content=["\']([^"\']+)["\']',
+        html_text,
+        re.IGNORECASE,
+    )
+    location = None
+    if keywords_match:
+        keyword_parts = [
+            _clean_text(part)
+            for part in keywords_match.group(1).split(",")
+        ]
+        if len(keyword_parts) >= 4:
+            location = ", ".join(
+                part for part in keyword_parts[2:5] if part
+            ) or None
+
+    source_record_id_match = re.search(r"_i(\d+)", listing_url, re.IGNORECASE)
+    source_record_id = (
+        source_record_id_match.group(1)
+        if source_record_id_match
+        else _record_id_from_url_or_title(listing_url, title)
+    )
+    return [
+        AuctionListing(
+            item=title,
+            category=category,
+            auction_house=auction_house,
+            status="Active",
+            price_cad=0.0,
+            buyer_premium_percent=0.0,
+            shipping_cad=0.0,
+            description=title,
+            location=location,
+            listing_url=urljoin(base_url, listing_url),
+            source_name=source_name,
+            source_record_id=source_record_id,
+        )
+    ]
+
+
 def parse_liveauctionworld_html(
     html_text: str,
     source_name: str,
@@ -310,6 +408,10 @@ def parse_liveauctionworld_html(
     from_grid = _extract_grid_lots(html_text, source_name, base_url)
     if from_grid:
         return from_grid
+
+    from_item_detail = _extract_item_detail_page(html_text, source_name, base_url)
+    if from_item_detail:
+        return from_item_detail
 
     return _extract_auction_cards(html_text, source_name, base_url)
 

@@ -98,6 +98,54 @@ def _listing_from_ingested_row(row: dict) -> AuctionListing:
     )
 
 
+def _load_selected_saved_search(saved_searches: list[dict]) -> None:
+    selected_saved_search = st.session_state.get(
+        "selected_saved_search",
+        "(none)",
+    )
+    if selected_saved_search == "(none)":
+        st.session_state["_saved_search_load_message"] = (
+            "Select a saved search first."
+        )
+        st.session_state["_saved_search_load_message_type"] = "info"
+        return
+
+    selected = next(
+        (
+            row
+            for row in saved_searches
+            if row["name"] == selected_saved_search
+        ),
+        None,
+    )
+    if selected is None:
+        st.session_state["_saved_search_load_message"] = (
+            "Saved search was not found. Please refresh and try again."
+        )
+        st.session_state["_saved_search_load_message_type"] = "error"
+        return
+
+    st.session_state["search_keyword"] = selected["keyword"]
+    st.session_state["category_filter"] = selected["category"]
+    st.session_state["status_filter"] = selected["status"]
+    st.session_state["min_price_cad"] = (
+        float(selected["min_price_cad"])
+        if selected["min_price_cad"] is not None
+        else 0.0
+    )
+    st.session_state["max_price_cad"] = (
+        float(selected["max_price_cad"])
+        if selected["max_price_cad"] is not None
+        else 0.0
+    )
+    st.session_state["sort_by"] = selected["sort_by"]
+    st.session_state["sort_desc"] = bool(selected["sort_desc"])
+    st.session_state["_saved_search_load_message"] = (
+        f"Loaded '{selected_saved_search}'."
+    )
+    st.session_state["_saved_search_load_message_type"] = "success"
+
+
 st.set_page_config(
     page_title="Antique Auction Finder",
     page_icon="🏺",
@@ -229,32 +277,26 @@ with st.sidebar:
         key="selected_saved_search",
     )
 
-    if st.button("Load selected search"):
-        if selected_saved_search == "(none)":
-            st.info("Select a saved search first.")
+    st.button(
+        "Load selected search",
+        on_click=_load_selected_saved_search,
+        args=(saved_searches,),
+    )
+
+    if st.session_state.get("_saved_search_load_message"):
+        message = str(st.session_state["_saved_search_load_message"])
+        message_type = st.session_state.get(
+            "_saved_search_load_message_type",
+            "info",
+        )
+        if message_type == "success":
+            st.success(message)
+        elif message_type == "error":
+            st.error(message)
         else:
-            selected = next(
-                row
-                for row in saved_searches
-                if row["name"] == selected_saved_search
-            )
-            st.session_state["search_keyword"] = selected["keyword"]
-            st.session_state["category_filter"] = selected["category"]
-            st.session_state["status_filter"] = selected["status"]
-            st.session_state["min_price_cad"] = (
-                float(selected["min_price_cad"])
-                if selected["min_price_cad"] is not None
-                else 0.0
-            )
-            st.session_state["max_price_cad"] = (
-                float(selected["max_price_cad"])
-                if selected["max_price_cad"] is not None
-                else 0.0
-            )
-            st.session_state["sort_by"] = selected["sort_by"]
-            st.session_state["sort_desc"] = bool(selected["sort_desc"])
-            st.success(f"Loaded '{selected_saved_search}'.")
-            st.rerun()
+            st.info(message)
+        st.session_state.pop("_saved_search_load_message", None)
+        st.session_state.pop("_saved_search_load_message_type", None)
 
     if st.button("Delete selected search"):
         if selected_saved_search == "(none)":

@@ -153,6 +153,23 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
         self.assertEqual(listings[0].item, "Blue Vase")
         self.assertEqual(listings[-1].item, "Antique Clock")
 
+    def test_parse_item_detail_page(self):
+        html_text = self._load_fixture("liveauctionworld_item_detail.html")
+        listings = parse_liveauctionworld_html(
+            html_text=html_text,
+            source_name="LiveAuctionWorld",
+            base_url="https://www.liveauctionworld.com/",
+        )
+        self.assertEqual(len(listings), 1)
+        listing = listings[0]
+        self.assertEqual(
+            listing.item,
+            "Josef Hambrusch Rifle Ferlach RARE 6.5 x 57R c/w Zeiss 8 x 56 Scope",
+        )
+        self.assertEqual(listing.auction_house, "KOS Auctions")
+        self.assertEqual(listing.category, "Firearms & Military")
+        self.assertIn("_i61264155", listing.listing_url or "")
+
 
 if __name__ == "__main__":
     unittest.main()
