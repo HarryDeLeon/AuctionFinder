@@ -110,8 +110,11 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 tax_percent REAL,
                 description TEXT NOT NULL,
                 location TEXT,
+                image_url TEXT,
                 listing_url TEXT,
                 lot_number TEXT,
+                opening_bid_cad REAL,
+                current_bid_cad REAL,
                 sale_date TEXT,
                 currency TEXT NOT NULL,
                 source_name TEXT,
@@ -149,6 +152,27 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 """
                 ALTER TABLE auction_sources_config
                 ADD COLUMN crawl_max_pages INTEGER NOT NULL DEFAULT 1
+                """
+            )
+        if not _table_has_column(conn, "ingested_listings", "image_url"):
+            conn.execute(
+                """
+                ALTER TABLE ingested_listings
+                ADD COLUMN image_url TEXT
+                """
+            )
+        if not _table_has_column(conn, "ingested_listings", "opening_bid_cad"):
+            conn.execute(
+                """
+                ALTER TABLE ingested_listings
+                ADD COLUMN opening_bid_cad REAL
+                """
+            )
+        if not _table_has_column(conn, "ingested_listings", "current_bid_cad"):
+            conn.execute(
+                """
+                ALTER TABLE ingested_listings
+                ADD COLUMN current_bid_cad REAL
                 """
             )
         conn.commit()
@@ -833,8 +857,11 @@ def upsert_ingested_listing(
                     tax_percent,
                     description,
                     location,
+                    image_url,
                     listing_url,
                     lot_number,
+                    opening_bid_cad,
+                    current_bid_cad,
                     sale_date,
                     currency,
                     source_name,
@@ -843,7 +870,7 @@ def upsert_ingested_listing(
                     last_seen_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -860,8 +887,11 @@ def upsert_ingested_listing(
                     listing.tax_percent,
                     listing.description,
                     listing.location,
+                    listing.image_url,
                     listing.listing_url,
                     listing.lot_number,
+                    listing.opening_bid_cad,
+                    listing.current_bid_cad,
                     sale_date_iso,
                     listing.currency,
                     listing.source_name,
@@ -888,8 +918,11 @@ def upsert_ingested_listing(
                 tax_percent = ?,
                 description = ?,
                 location = ?,
+                image_url = ?,
                 listing_url = ?,
                 lot_number = ?,
+                opening_bid_cad = ?,
+                current_bid_cad = ?,
                 sale_date = ?,
                 currency = ?,
                 source_name = ?,
@@ -909,8 +942,11 @@ def upsert_ingested_listing(
                 listing.tax_percent,
                 listing.description,
                 listing.location,
+                listing.image_url,
                 listing.listing_url,
                 listing.lot_number,
+                listing.opening_bid_cad,
+                listing.current_bid_cad,
                 sale_date_iso,
                 listing.currency,
                 listing.source_name,
@@ -944,8 +980,11 @@ def list_ingested_listings(
             tax_percent,
             description,
             location,
+            image_url,
             listing_url,
             lot_number,
+            opening_bid_cad,
+            current_bid_cad,
             sale_date,
             currency,
             source_name,

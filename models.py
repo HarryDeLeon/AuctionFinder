@@ -16,8 +16,11 @@ class AuctionListing:
     tax_percent: Optional[float] = None
     description: str = ""
     location: Optional[str] = None
+    image_url: Optional[str] = None
     listing_url: Optional[str] = None
     lot_number: Optional[str] = None
+    opening_bid_cad: Optional[float] = None
+    current_bid_cad: Optional[float] = None
     sale_date: Optional[date] = None
     currency: str = "CAD"
     source_name: Optional[str] = None

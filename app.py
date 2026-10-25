@@ -7,6 +7,7 @@ from io import StringIO
 from auction_sources import load_manual_source_csv_preview_with_report
 from comparables import analyze_listing_against_comparables
 from duplicate_detection import summarize_potential_duplicates
+from image_search import filter_listings_by_image
 from ingestion import run_source_crawl
 from ingestion import run_source_keyword_crawl
 from models import AuctionListing
@@ -92,8 +93,19 @@ def _listing_from_ingested_row(row: dict) -> AuctionListing:
         ),
         description=str(row.get("description") or ""),
         location=row.get("location"),
+        image_url=row.get("image_url"),
         listing_url=row.get("listing_url"),
         lot_number=row.get("lot_number"),
+        opening_bid_cad=(
+            float(row["opening_bid_cad"])
+            if row.get("opening_bid_cad") is not None
+            else None
+        ),
+        current_bid_cad=(
+            float(row["current_bid_cad"])
+            if row.get("current_bid_cad") is not None
+            else None
+        ),
         sale_date=sale_date_value,
         currency=str(row.get("currency") or "CAD"),
         source_name=row.get("source_name"),
@@ -220,6 +232,30 @@ min_price_cad = price_col1.number_input(
     step=25.0,
     key="min_price_cad",
 )
+
+image_criteria_file = st.file_uploader(
+    "Image criteria (optional)",
+    type=["png", "jpg", "jpeg", "webp"],
+    help="Upload a reference image to find visually similar listings.",
+    key="image_criteria_file",
+)
+image_match_threshold = st.slider(
+    "Image match strictness",
+    min_value=4,
+    max_value=24,
+    value=12,
+    help=(
+        "Lower is stricter, higher is broader. "
+        "Uses perceptual hash distance."
+    ),
+)
+criteria_mode = st.segmented_control(
+    "Criteria mode",
+    options=["Any (text OR image)", "All (text AND image)"],
+    default="Any (text OR image)",
+    key="criteria_mode",
+)
+
 max_price_cad_raw = price_col2.number_input(
     "Maximum price (CAD, 0 = no cap)",
     min_value=0.0,
@@ -247,8 +283,9 @@ sort_desc = sort_col2.checkbox(
 search_action_col1, search_action_col2 = st.columns(2)
 if search_action_col1.button("Search web source now"):
     normalized_search = search.strip()
-    if not normalized_search:
-        st.info("Enter a keyword first (for example: rifle).")
+    has_image_criteria = image_criteria_file is not None
+    if not normalized_search and not has_image_criteria:
+        st.info("Enter text criteria or upload an image first.")
     else:
         available_html_sources = [
             source
@@ -289,10 +326,15 @@ if search_action_col1.button("Search web source now"):
             total_updated = 0
             source_errors = []
             for source in available_html_sources:
-                summary = run_source_keyword_crawl(
-                    source_config_id=int(source["id"]),
-                    keyword=normalized_search,
-                )
+                if normalized_search:
+                    summary = run_source_keyword_crawl(
+                        source_config_id=int(source["id"]),
+                        keyword=normalized_search,
+                    )
+                else:
+                    summary = run_source_crawl(
+                        source_config_id=int(source["id"]),
+                    )
                 total_discovered += summary.discovered_count
                 total_inserted += summary.inserted_count
                 total_updated += summary.updated_count
@@ -320,7 +362,7 @@ if search_action_col1.button("Search web source now"):
             st.rerun()
 
 search_action_col2.caption(
-    "Runs a live keyword crawl against enabled HTML sources and stores matches."
+    "Runs a live crawl against enabled HTML sources using your criteria and stores matches."
 )
 
 with st.sidebar:
@@ -880,9 +922,9 @@ all_listings = (
     + ingested_listings
 )
 
-filtered = search_listings(
+base_filtered = search_listings(
     listings=all_listings,
-    keyword=search,
+    keyword="",
     category=category,
     status=status,
     min_price_cad=min_price,
@@ -890,6 +932,55 @@ filtered = search_listings(
     sort_by=sort_by,
     sort_desc=sort_desc,
 )
+
+text_filtered = base_filtered
+if search.strip():
+    text_filtered = search_listings(
+        listings=all_listings,
+        keyword=search,
+        category=category,
+        status=status,
+        min_price_cad=min_price,
+        max_price_cad=max_price,
+        sort_by=sort_by,
+        sort_desc=sort_desc,
+    )
+
+
+def _listing_key(listing: AuctionListing) -> str:
+    return listing.source_record_id or f"{listing.item}|{listing.auction_house}"
+
+
+filtered = text_filtered
+
+image_match_distances: dict[str, int] = {}
+if image_criteria_file is not None:
+    uploaded_image_bytes = image_criteria_file.getvalue()
+    image_filtered, image_match_distances = filter_listings_by_image(
+        base_filtered,
+        uploaded_image_bytes,
+        max_hamming_distance=image_match_threshold,
+    )
+    if search.strip():
+        if criteria_mode == "Any (text OR image)":
+            merged: list[AuctionListing] = []
+            seen_keys = set()
+            for listing in text_filtered + image_filtered:
+                listing_key = _listing_key(listing)
+                if listing_key in seen_keys:
+                    continue
+                seen_keys.add(listing_key)
+                merged.append(listing)
+            filtered = merged
+        else:
+            image_keys = {_listing_key(listing) for listing in image_filtered}
+            filtered = [
+                listing
+                for listing in text_filtered
+                if _listing_key(listing) in image_keys
+            ]
+    else:
+        filtered = image_filtered
 
 # Prepare the comparison table and detail records
 rows = []
@@ -914,8 +1005,22 @@ for listing in filtered:
             "Category": listing.category,
             "Auction house": listing.auction_house,
             "Status": listing.status,
+            "Availability": (
+                "Available"
+                if listing.status in {"Active", "Upcoming"}
+                else "Unavailable"
+            ),
             "Cost basis": cost_basis,
             "Listed / hammer price (CAD)": listing.price_cad,
+            "Current bid / initial price (CAD)": (
+                listing.current_bid_cad
+                if listing.current_bid_cad is not None
+                else (
+                    listing.opening_bid_cad
+                    if listing.opening_bid_cad is not None
+                    else listing.price_cad
+                )
+            ),
             "Premium (%)": listing.buyer_premium_percent,
             "Shipping (CAD)": listing.shipping_cad,
             "Estimated total (CAD)": breakdown.estimated_total_cad,
@@ -926,6 +1031,14 @@ for listing in filtered:
             "Confidence": comparables.confidence_label,
             "Potential duplicates": duplicate_summary.candidate_count,
             "Duplicate review": duplicate_summary.review_label,
+            "Image match distance": (
+                image_match_distances.get(
+                    listing.source_record_id
+                    or f"{listing.item}|{listing.auction_house}"
+                )
+                if image_match_distances
+                else None
+            ),
         }
     )
     detail_records.append(
@@ -1010,6 +1123,12 @@ if rows:
             detail_col1.write(
                 f"**Estimated total:** ${breakdown.estimated_total_cad:,.2f}"
             )
+            detail_col1.write(
+                "**Current bid / initial price:** "
+                f"${(listing.current_bid_cad if listing.current_bid_cad is not None else (listing.opening_bid_cad if listing.opening_bid_cad is not None else listing.price_cad)):,.2f}"
+            )
+            if listing.image_url:
+                detail_col1.write(f"**Image URL:** {listing.image_url}")
 
             detail_col2.write("**Price breakdown (CAD)**")
             detail_col2.write(

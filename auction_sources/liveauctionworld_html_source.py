@@ -40,6 +40,22 @@ def _status_from_text(text: str) -> str:
     return "Active"
 
 
+def _extract_bid_fields(text: str) -> tuple[float | None, float | None]:
+    current_bid_match = re.search(
+        r"(?:current|winning)\s*bid[^\d-]*(-?\d+(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    opening_bid_match = re.search(
+        r"(?:opening|start(?:ing)?)\s*bid[^\d-]*(-?\d+(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    current_bid = float(current_bid_match.group(1)) if current_bid_match else None
+    opening_bid = float(opening_bid_match.group(1)) if opening_bid_match else None
+    return current_bid, opening_bid
+
+
 def _record_id_from_url_or_title(url: str, title: str) -> str:
     key = (url.strip() or title.strip()).encode("utf-8")
     return hashlib.sha1(key).hexdigest()[:16]
@@ -93,11 +109,14 @@ def _extract_from_json_ld(
                     continue
                 listing_url = urljoin(base_url, raw_url)
                 offers = item_data.get("offers", {})
-                price_cad = _safe_float(
-                    offers.get("price")
-                    if isinstance(offers, dict)
-                    else None
-                )
+                current_bid_cad = 0.0
+                opening_bid_cad = 0.0
+                if isinstance(offers, dict):
+                    current_bid_cad = _safe_float(offers.get("price"))
+                    opening_bid_cad = _safe_float(
+                        offers.get("lowPrice") or offers.get("priceSpecification")
+                    )
+                price_cad = current_bid_cad or opening_bid_cad
                 seller_name = source_name
                 if isinstance(item_data.get("seller"), dict):
                     seller_name = str(
@@ -105,6 +124,12 @@ def _extract_from_json_ld(
                     ).strip()
                 category = str(item_data.get("category") or "Other").strip() or "Other"
                 description = str(item_data.get("description") or "").strip()
+                image_value = item_data.get("image")
+                image_url = None
+                if isinstance(image_value, list) and image_value:
+                    image_url = urljoin(base_url, str(image_value[0]))
+                elif isinstance(image_value, str) and image_value.strip():
+                    image_url = urljoin(base_url, image_value.strip())
                 status = _status_from_text(
                     f"{item_data.get('availability', '')} {description}"
                 )
@@ -122,7 +147,10 @@ def _extract_from_json_ld(
                         buyer_premium_percent=0.0,
                         shipping_cad=0.0,
                         description=description,
+                        image_url=image_url,
                         listing_url=listing_url,
+                        opening_bid_cad=(opening_bid_cad if opening_bid_cad > 0 else None),
+                        current_bid_cad=(current_bid_cad if current_bid_cad > 0 else None),
                         source_name=source_name,
                         source_record_id=source_record_id,
                     )
@@ -257,7 +285,39 @@ def _extract_grid_lots(
             re.IGNORECASE | re.DOTALL,
         )
         bid_text = _clean_text(bid_match.group(1)) if bid_match else ""
-        price_cad = _safe_float(bid_text)
+        current_bid_cad = _safe_float(bid_text)
+
+        opening_bid_match = re.search(
+            r"<div class='gridView_openingbid'>(.*?)</div>",
+            block,
+            re.IGNORECASE | re.DOTALL,
+        )
+        opening_bid_text = (
+            _clean_text(opening_bid_match.group(1))
+            if opening_bid_match
+            else ""
+        )
+        opening_bid_cad = _safe_float(opening_bid_text)
+
+        if not opening_bid_text and not bid_text:
+            text_current_bid, text_opening_bid = _extract_bid_fields(
+                _clean_text(block)
+            )
+            if text_current_bid is not None:
+                current_bid_cad = max(text_current_bid, 0.0)
+            if text_opening_bid is not None:
+                opening_bid_cad = max(text_opening_bid, 0.0)
+
+        price_cad = current_bid_cad or opening_bid_cad
+
+        image_url = None
+        image_match = re.search(
+            r"<img[^>]+src='([^']+)'",
+            block,
+            re.IGNORECASE,
+        )
+        if image_match:
+            image_url = urljoin(base_url, image_match.group(1).strip())
 
         status_text = f"{bid_text} {description}"
         status = _status_from_text(status_text)
@@ -289,8 +349,11 @@ def _extract_grid_lots(
                 buyer_premium_percent=0.0,
                 shipping_cad=0.0,
                 description=description,
+                image_url=image_url,
                 listing_url=listing_url,
                 lot_number=lot_number,
+                opening_bid_cad=(opening_bid_cad if opening_bid_cad > 0 else None),
+                current_bid_cad=(current_bid_cad if current_bid_cad > 0 else None),
                 source_name=source_name,
                 source_record_id=source_record_id,
             )
@@ -389,6 +452,17 @@ def _extract_item_detail_page(
             shipping_cad=0.0,
             description=title,
             location=location,
+            image_url=(
+                urljoin(base_url, _clean_text(image_match.group(1)).strip())
+                if (
+                    image_match := re.search(
+                        r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
+                        html_text,
+                        re.IGNORECASE,
+                    )
+                )
+                else None
+            ),
             listing_url=urljoin(base_url, listing_url),
             source_name=source_name,
             source_record_id=source_record_id,
@@ -749,8 +823,24 @@ class LiveAuctionWorldHtmlAdapter:
 
                 lot_number = str(row.get("ItemLot") or "").strip() or None
                 listing_url = urljoin(base_url, f"item.aspx?i={item_id}")
-                price_cad = _safe_float(row.get("ItemCurrentBidAmount"))
+                current_bid_cad = _safe_float(row.get("ItemCurrentBidAmount"))
+                opening_bid_cad = _safe_float(
+                    row.get("ItemOpeningBidAmount")
+                    or row.get("ItemOpeningBid")
+                    or row.get("ItemStartingBid")
+                )
+                price_cad = current_bid_cad or opening_bid_cad
                 status = "Sold" if int(row.get("ItemSold") or 0) == 1 else "Active"
+                image_raw = (
+                    row.get("ItemImage")
+                    or row.get("ItemImageURL")
+                    or row.get("ImageURL")
+                )
+                image_url = (
+                    urljoin(base_url, str(image_raw).strip())
+                    if image_raw
+                    else None
+                )
 
                 listing = AuctionListing(
                     item=item_title,
@@ -762,8 +852,11 @@ class LiveAuctionWorldHtmlAdapter:
                     shipping_cad=0.0,
                     description=str(row.get("ItemDescription") or "").strip(),
                     location=location,
+                    image_url=image_url,
                     listing_url=listing_url,
                     lot_number=lot_number,
+                    opening_bid_cad=(opening_bid_cad if opening_bid_cad > 0 else None),
+                    current_bid_cad=(current_bid_cad if current_bid_cad > 0 else None),
                     source_name=source_name,
                     source_record_id=source_record_id,
                 )

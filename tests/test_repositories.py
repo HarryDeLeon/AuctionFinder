@@ -210,6 +210,9 @@ class RepositoryTests(unittest.TestCase):
             price_cad=200.0,
             buyer_premium_percent=20.0,
             shipping_cad=25.0,
+            image_url="https://example.com/blue-vase.png",
+            opening_bid_cad=100.0,
+            current_bid_cad=200.0,
             source_name="Dummy source",
             source_record_id="abc-123",
         )
@@ -233,6 +236,9 @@ class RepositoryTests(unittest.TestCase):
         rows = list_ingested_listings(source_config_id=source_id, db_path=self.db_path)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "Sold")
+        self.assertEqual(rows[0]["image_url"], "https://example.com/blue-vase.png")
+        self.assertEqual(rows[0]["opening_bid_cad"], 100.0)
+        self.assertEqual(rows[0]["current_bid_cad"], 200.0)
 
     def test_crawl_run_tracking(self):
         source_id = create_source_config(

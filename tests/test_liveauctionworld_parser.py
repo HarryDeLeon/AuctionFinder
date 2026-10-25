@@ -184,6 +184,8 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
                     "AuctionCountry": "Canada",
                     "ItemLot": "1",
                     "ItemCurrentBidAmount": 120.0,
+                    "ItemOpeningBidAmount": 80.0,
+                    "ItemImageURL": "/images/blue-vase.png",
                     "ItemSold": 0,
                 },
                 {
@@ -221,6 +223,9 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
         )
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0].item, "Blue Vase")
+        self.assertEqual(listings[0].current_bid_cad, 120.0)
+        self.assertEqual(listings[0].opening_bid_cad, 80.0)
+        self.assertIn("/images/blue-vase.png", listings[0].image_url or "")
 
 
 if __name__ == "__main__":
