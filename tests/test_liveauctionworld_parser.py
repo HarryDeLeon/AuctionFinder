@@ -227,6 +227,51 @@ class LiveAuctionWorldParserTests(unittest.TestCase):
         self.assertEqual(listings[0].opening_bid_cad, 80.0)
         self.assertIn("/images/blue-vase.png", listings[0].image_url or "")
 
+    def test_crawl_url_uses_explicit_url(self):
+        page_url = "https://www.liveauctionworld.com/Fall-Antique-Sale_as555"
+        html_text = self._load_fixture("liveauctionworld_auction_detail_page1.html")
+        calls: list[str] = []
+
+        def page_fetcher(url: str, user_agent: str, timeout_seconds: float) -> str:
+            calls.append(url)
+            return html_text
+
+        adapter = LiveAuctionWorldHtmlAdapter(
+            fetcher=page_fetcher,
+            sleeper=lambda _: None,
+        )
+        listings = adapter.crawl_url(
+            {
+                "id": 1,
+                "name": "LiveAuctionWorld",
+                "base_url": "https://www.liveauctionworld.com/",
+                "source_type": "html",
+                "rate_limit_seconds": 0.1,
+                "crawl_max_pages": 1,
+                "user_agent": "AuctionFinderBot/0.1",
+            },
+            auction_url=page_url,
+        )
+        self.assertEqual(calls[0], page_url)
+        self.assertGreaterEqual(len(listings), 1)
+
+    def test_crawl_url_rejects_non_liveauctionworld_domain(self):
+        adapter = LiveAuctionWorldHtmlAdapter(
+            fetcher=lambda url, user_agent, timeout_seconds: "<html></html>"
+        )
+        with self.assertRaises(ValueError):
+            adapter.crawl_url(
+                {
+                    "id": 1,
+                    "name": "LiveAuctionWorld",
+                    "base_url": "https://www.liveauctionworld.com/",
+                    "source_type": "html",
+                    "rate_limit_seconds": 0.1,
+                    "user_agent": "AuctionFinderBot/0.1",
+                },
+                auction_url="https://example.com/auction",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

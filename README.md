@@ -58,6 +58,10 @@ The app uses Python's built-in `sqlite3` module and creates a local database fil
 - Sprint 3 hardening adds retry/backoff fetching for LiveAuctionWorld HTML, parser fixture coverage under `tests/fixtures/`, and richer source telemetry in the sidebar (last crawl status/finished time/error).
 - Sprint 4 adds LiveAuctionWorld structure-aware extraction for auction cards and lot grid entries (including lot number, auctioneer, description, bid text parsing), plus controlled pagination via per-source `crawl_max_pages`.
 - The main page now supports on-demand keyword web crawl ("Search web source now"), which runs a live crawl for the typed keyword across enabled HTML sources and stores matching results locally.
+- The main page now supports scanning a specific auction webpage URL ("Scan auction URL now") through enabled HTML sources and ingesting lots from that page.
+- A prototype internet price comparison report can analyze the top-ranked filtered listings (default top 10) and summarize internet comparable prices (lowest/highest/average CAD) with comparable links for review.
+- Internet price comparison runs are persisted in SQLite and can be reloaded in-app from recent run history.
+- Stored internet comparison runs can be deleted from the UI, and report detail expanders show the captured comparable links for each analyzed item.
 
 All listings are currently fictional sample data.
 

@@ -6,6 +6,7 @@ from auction_sources.liveauctionworld_html_source import LiveAuctionWorldHtmlAda
 from ingestion import run_source_crawl
 from ingestion import ADAPTER_REGISTRY
 from ingestion import run_source_keyword_crawl
+from ingestion import run_source_url_crawl
 from models import AuctionListing
 from repositories import (
     create_source_config,
@@ -119,6 +120,48 @@ class IngestionTests(unittest.TestCase):
             summary = run_source_keyword_crawl(
                 source_id,
                 keyword="rifle",
+                db_path=self.db_path,
+            )
+        finally:
+            ADAPTER_REGISTRY["html"] = original_adapter
+
+        self.assertEqual(summary.status, "success")
+        self.assertEqual(summary.discovered_count, 1)
+
+    def test_url_crawl_uses_adapter_url_method(self):
+        class UrlAdapter:
+            def crawl_latest(self, source_config):
+                return []
+
+            def crawl_url(self, source_config, auction_url):
+                return [
+                    AuctionListing(
+                        item=f"Lot from {auction_url}",
+                        category="Auction lot",
+                        auction_house="LiveAuctionWorld",
+                        status="Active",
+                        price_cad=0.0,
+                        buyer_premium_percent=0.0,
+                        shipping_cad=0.0,
+                        description="url crawl match",
+                        listing_url=auction_url,
+                        source_name="LiveAuctionWorld",
+                        source_record_id="url-1",
+                    )
+                ]
+
+        original_adapter = ADAPTER_REGISTRY["html"]
+        ADAPTER_REGISTRY["html"] = UrlAdapter()
+        try:
+            source_id = create_source_config(
+                name="LiveAuctionWorld",
+                base_url="https://www.liveauctionworld.com/",
+                source_type="html",
+                db_path=self.db_path,
+            )
+            summary = run_source_url_crawl(
+                source_id,
+                auction_url="https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
                 db_path=self.db_path,
             )
         finally:

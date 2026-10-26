@@ -3,6 +3,7 @@ from datetime import date
 
 from models import AuctionListing
 from search import search_listings
+from search import select_top_listings_for_internet_report
 
 
 class SearchListingsTests(unittest.TestCase):
@@ -96,6 +97,48 @@ class SearchListingsTests(unittest.TestCase):
             sort_by="Relevance",
         )
         self.assertEqual(results[0].auction_house, "D")
+
+    def test_select_top_listings_limits_count(self):
+        results = select_top_listings_for_internet_report(
+            listings=self.listings,
+            keyword="porcelain",
+            limit=2,
+        )
+        self.assertEqual(len(results), 2)
+
+    def test_select_top_listings_prefers_image_match_when_scores_close(self):
+        listings = [
+            AuctionListing(
+                item="Antique vase",
+                description="Hand painted antique",
+                category="Porcelain",
+                auction_house="A",
+                status="Active",
+                price_cad=200.0,
+                buyer_premium_percent=20.0,
+                shipping_cad=20.0,
+                source_record_id="a",
+            ),
+            AuctionListing(
+                item="Antique vase",
+                description="Hand painted antique",
+                category="Porcelain",
+                auction_house="B",
+                status="Active",
+                price_cad=200.0,
+                buyer_premium_percent=20.0,
+                shipping_cad=20.0,
+                source_record_id="b",
+            ),
+        ]
+
+        results = select_top_listings_for_internet_report(
+            listings=listings,
+            keyword="antique",
+            image_match_distances={"b": 4},
+            limit=1,
+        )
+        self.assertEqual(results[0].source_record_id, "b")
 
 
 if __name__ == "__main__":

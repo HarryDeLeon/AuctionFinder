@@ -5,7 +5,7 @@ import time
 from html import unescape
 from typing import Dict, Iterable, List
 from urllib.error import URLError
-from urllib.parse import quote_plus, urlencode, urljoin
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from models import AuctionListing
@@ -597,66 +597,23 @@ class LiveAuctionWorldHtmlAdapter:
             template = f"{template}{connector}txtSearch={quote_plus(keyword)}"
         return urljoin(base_url, template)
 
-    def _fetch_with_retry(
-        self,
-        crawl_url: str,
-        user_agent: str,
-        timeout_seconds: float,
-        retries: int,
-        rate_limit_seconds: float,
-    ) -> str:
-        attempts = max(retries, 1)
-        backoff_seconds = max(rate_limit_seconds, 0.5)
-        last_error: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                return self._fetcher(
-                    url=crawl_url,
-                    user_agent=user_agent,
-                    timeout_seconds=timeout_seconds,
-                )
-            except (URLError, TimeoutError, OSError) as exc:
-                last_error = exc
-                if attempt >= attempts:
-                    break
-                self._sleeper(backoff_seconds * attempt)
-
-        if last_error is None:
-            raise ValueError("HTML fetch failed without a captured exception.")
-        raise ValueError(
-            f"Failed to fetch LiveAuctionWorld HTML after {attempts} attempt(s): {last_error}"
-        ) from last_error
-
-    def _fetch_page(
-        self,
-        page_url: str,
-        user_agent: str,
-        timeout_seconds: float,
-        rate_limit_seconds: float,
-    ) -> str:
-        html_text = self._fetch_with_retry(
-            crawl_url=page_url,
-            user_agent=user_agent,
-            timeout_seconds=timeout_seconds,
-            retries=3,
-            rate_limit_seconds=rate_limit_seconds,
-        )
-        if rate_limit_seconds > 0:
-            self._sleeper(rate_limit_seconds)
-        return html_text
-
-    def crawl_latest(
-        self,
-        source_config: Dict[str, object],
-        keyword: str | None = None,
-    ) -> List[AuctionListing]:
-        base_url = str(source_config["base_url"]).strip()
-        if "liveauctionworld.com" not in base_url.lower():
+    def _validate_supported_domain(self, url: str) -> None:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        if "liveauctionworld.com" not in hostname:
             raise ValueError(
                 "LiveAuctionWorld HTML adapter only supports liveauctionworld.com URLs."
             )
 
-        crawl_url = self._resolve_crawl_url(source_config, keyword=keyword)
+    def _crawl_from_url(
+        self,
+        source_config: Dict[str, object],
+        crawl_url: str,
+    ) -> List[AuctionListing]:
+        base_url = str(source_config["base_url"]).strip()
+        self._validate_supported_domain(base_url)
+        self._validate_supported_domain(crawl_url)
+
         user_agent = (
             str(source_config.get("user_agent") or "").strip()
             or "AuctionFinderBot/0.1"
@@ -741,6 +698,78 @@ class LiveAuctionWorldHtmlAdapter:
                 "No listing records could be parsed from the fetched HTML."
             )
         return results
+
+    def _fetch_with_retry(
+        self,
+        crawl_url: str,
+        user_agent: str,
+        timeout_seconds: float,
+        retries: int,
+        rate_limit_seconds: float,
+    ) -> str:
+        attempts = max(retries, 1)
+        backoff_seconds = max(rate_limit_seconds, 0.5)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._fetcher(
+                    url=crawl_url,
+                    user_agent=user_agent,
+                    timeout_seconds=timeout_seconds,
+                )
+            except (URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    break
+                self._sleeper(backoff_seconds * attempt)
+
+        if last_error is None:
+            raise ValueError("HTML fetch failed without a captured exception.")
+        raise ValueError(
+            f"Failed to fetch LiveAuctionWorld HTML after {attempts} attempt(s): {last_error}"
+        ) from last_error
+
+    def _fetch_page(
+        self,
+        page_url: str,
+        user_agent: str,
+        timeout_seconds: float,
+        rate_limit_seconds: float,
+    ) -> str:
+        html_text = self._fetch_with_retry(
+            crawl_url=page_url,
+            user_agent=user_agent,
+            timeout_seconds=timeout_seconds,
+            retries=3,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        if rate_limit_seconds > 0:
+            self._sleeper(rate_limit_seconds)
+        return html_text
+
+    def crawl_latest(
+        self,
+        source_config: Dict[str, object],
+        keyword: str | None = None,
+    ) -> List[AuctionListing]:
+        crawl_url = self._resolve_crawl_url(source_config, keyword=keyword)
+        return self._crawl_from_url(
+            source_config=source_config,
+            crawl_url=crawl_url,
+        )
+
+    def crawl_url(
+        self,
+        source_config: Dict[str, object],
+        auction_url: str,
+    ) -> List[AuctionListing]:
+        normalized_url = auction_url.strip()
+        if not normalized_url:
+            raise ValueError("Auction URL is required for URL crawl.")
+        return self._crawl_from_url(
+            source_config=source_config,
+            crawl_url=normalized_url,
+        )
 
     def crawl_keyword(
         self,

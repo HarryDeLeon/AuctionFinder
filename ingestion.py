@@ -57,6 +57,7 @@ ADAPTER_REGISTRY = {
 def _run_source_crawl_internal(
     source_config_id: int,
     keyword: Optional[str] = None,
+    auction_url: Optional[str] = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> CrawlSummary:
     source_config = get_source_config(source_config_id, db_path=db_path)
@@ -95,7 +96,9 @@ def _run_source_crawl_internal(
         )
 
     try:
-        if keyword and hasattr(adapter, "crawl_keyword"):
+        if auction_url and hasattr(adapter, "crawl_url"):
+            listings = adapter.crawl_url(source_config, auction_url)
+        elif keyword and hasattr(adapter, "crawl_keyword"):
             listings = adapter.crawl_keyword(source_config, keyword)
         else:
             listings = adapter.crawl_latest(source_config)
@@ -150,6 +153,7 @@ def run_source_crawl(
     return _run_source_crawl_internal(
         source_config_id=source_config_id,
         keyword=None,
+        auction_url=None,
         db_path=db_path,
     )
 
@@ -165,5 +169,22 @@ def run_source_keyword_crawl(
     return _run_source_crawl_internal(
         source_config_id=source_config_id,
         keyword=normalized,
+        auction_url=None,
+        db_path=db_path,
+    )
+
+
+def run_source_url_crawl(
+    source_config_id: int,
+    auction_url: str,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> CrawlSummary:
+    normalized = auction_url.strip()
+    if not normalized:
+        raise ValueError("Auction URL is required for source URL crawl.")
+    return _run_source_crawl_internal(
+        source_config_id=source_config_id,
+        keyword=None,
+        auction_url=normalized,
         db_path=db_path,
     )

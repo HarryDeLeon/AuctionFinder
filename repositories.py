@@ -147,6 +147,41 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS internet_price_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                auction_page_url TEXT NOT NULL,
+                search_keyword TEXT NOT NULL,
+                top_items_limit INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS internet_price_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                item_title TEXT NOT NULL,
+                auction_house TEXT NOT NULL,
+                auction_listing_url TEXT,
+                auction_page_url TEXT,
+                auction_status TEXT NOT NULL,
+                auction_price_cad REAL NOT NULL,
+                internet_comparable_count INTEGER NOT NULL,
+                internet_lowest_cad REAL,
+                internet_highest_cad REAL,
+                internet_average_cad REAL,
+                internet_error TEXT,
+                comparable_links TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(run_id)
+                    REFERENCES internet_price_runs(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
         if not _table_has_column(conn, "auction_sources_config", "crawl_max_pages"):
             conn.execute(
                 """
@@ -810,6 +845,187 @@ def list_recent_crawl_runs(
         conn.row_factory = sqlite3.Row
         rows = conn.execute(query, tuple(params)).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_internet_price_run(
+    auction_page_url: str,
+    search_keyword: str,
+    top_items_limit: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> int:
+    normalized_url = auction_page_url.strip()
+    if not normalized_url:
+        raise ValueError("auction_page_url is required")
+    if top_items_limit < 1:
+        raise ValueError("top_items_limit must be at least 1")
+
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO internet_price_runs (
+                auction_page_url,
+                search_keyword,
+                top_items_limit,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                normalized_url,
+                search_keyword.strip(),
+                int(top_items_limit),
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def add_internet_price_result(
+    run_id: int,
+    result_row: Dict[str, Any],
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO internet_price_results (
+                run_id,
+                item_title,
+                auction_house,
+                auction_listing_url,
+                auction_page_url,
+                auction_status,
+                auction_price_cad,
+                internet_comparable_count,
+                internet_lowest_cad,
+                internet_highest_cad,
+                internet_average_cad,
+                internet_error,
+                comparable_links,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                str(result_row.get("Item") or "").strip(),
+                str(result_row.get("Auction house") or "").strip(),
+                result_row.get("Auction listing URL"),
+                result_row.get("Auction page URL"),
+                str(result_row.get("Auction status") or "").strip(),
+                float(result_row.get("Auction price (CAD)") or 0.0),
+                int(result_row.get("Internet comparable count") or 0),
+                result_row.get("Internet lowest (CAD)"),
+                result_row.get("Internet highest (CAD)"),
+                result_row.get("Internet average (CAD)"),
+                result_row.get("Internet error"),
+                result_row.get("Comparable links"),
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def save_internet_price_report(
+    auction_page_url: str,
+    search_keyword: str,
+    top_items_limit: int,
+    report_rows: List[Dict[str, Any]],
+    db_path: Path = DEFAULT_DB_PATH,
+) -> int:
+    run_id = create_internet_price_run(
+        auction_page_url=auction_page_url,
+        search_keyword=search_keyword,
+        top_items_limit=top_items_limit,
+        db_path=db_path,
+    )
+    for row in report_rows:
+        add_internet_price_result(
+            run_id=run_id,
+            result_row=row,
+            db_path=db_path,
+        )
+    return run_id
+
+
+def list_recent_internet_price_runs(
+    limit: int = 20,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> List[Dict[str, Any]]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                auction_page_url,
+                search_keyword,
+                top_items_limit,
+                created_at
+            FROM internet_price_runs
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_internet_price_report_results(
+    run_id: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> List[Dict[str, Any]]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                item_title AS "Item",
+                auction_house AS "Auction house",
+                auction_listing_url AS "Auction listing URL",
+                auction_page_url AS "Auction page URL",
+                auction_status AS "Auction status",
+                auction_price_cad AS "Auction price (CAD)",
+                internet_comparable_count AS "Internet comparable count",
+                internet_lowest_cad AS "Internet lowest (CAD)",
+                internet_highest_cad AS "Internet highest (CAD)",
+                internet_average_cad AS "Internet average (CAD)",
+                internet_error AS "Internet error",
+                comparable_links AS "Comparable links"
+            FROM internet_price_results
+            WHERE run_id = ?
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_internet_price_run(
+    run_id: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            DELETE FROM internet_price_results
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        )
+        cursor = conn.execute(
+            """
+            DELETE FROM internet_price_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Internet price run id {run_id} was not found")
+        conn.commit()
 
 
 def upsert_ingested_listing(

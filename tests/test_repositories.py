@@ -4,11 +4,14 @@ from pathlib import Path
 
 from models import AuctionListing
 from repositories import (
+    add_internet_price_result,
     complete_crawl_run,
+    create_internet_price_run,
     create_crawl_run,
     create_source_config,
     delete_source_config,
     delete_saved_search,
+    delete_internet_price_run,
     delete_watchlist_entry,
     export_saved_searches_to_csv,
     export_watchlist_to_csv,
@@ -17,11 +20,14 @@ from repositories import (
     import_watchlist_from_csv,
     initialize_database,
     list_ingested_listings,
+    list_internet_price_report_results,
     list_recent_crawl_runs,
+    list_recent_internet_price_runs,
     list_saved_searches,
     list_source_configs,
     list_watchlist_entries,
     update_source_config,
+    save_internet_price_report,
     upsert_ingested_listing,
     upsert_saved_search,
     upsert_watchlist_entry,
@@ -261,6 +267,104 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["status"], "success")
         self.assertEqual(runs[0]["discovered_count"], 2)
+
+    def test_internet_price_report_persistence_round_trip(self):
+        run_id = create_internet_price_run(
+            auction_page_url="https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+            search_keyword="vase",
+            top_items_limit=10,
+            db_path=self.db_path,
+        )
+        add_internet_price_result(
+            run_id=run_id,
+            result_row={
+                "Item": "Blue Vase",
+                "Auction house": "House A",
+                "Auction listing URL": "https://www.liveauctionworld.com/item.aspx?i=1001",
+                "Auction page URL": "https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+                "Auction status": "Active",
+                "Auction price (CAD)": 120.0,
+                "Internet comparable count": 2,
+                "Internet lowest (CAD)": 100.0,
+                "Internet highest (CAD)": 170.0,
+                "Internet average (CAD)": 135.0,
+                "Internet error": None,
+                "Comparable links": "https://example.com/a\nhttps://example.com/b",
+            },
+            db_path=self.db_path,
+        )
+
+        runs = list_recent_internet_price_runs(db_path=self.db_path)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["id"], run_id)
+
+        rows = list_internet_price_report_results(run_id, db_path=self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Item"], "Blue Vase")
+        self.assertEqual(rows[0]["Internet average (CAD)"], 135.0)
+
+    def test_save_internet_price_report_saves_run_and_rows(self):
+        run_id = save_internet_price_report(
+            auction_page_url="https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+            search_keyword="clock",
+            top_items_limit=5,
+            report_rows=[
+                {
+                    "Item": "Antique Clock",
+                    "Auction house": "House B",
+                    "Auction listing URL": "https://www.liveauctionworld.com/item.aspx?i=2001",
+                    "Auction page URL": "https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+                    "Auction status": "Active",
+                    "Auction price (CAD)": 210.0,
+                    "Internet comparable count": 1,
+                    "Internet lowest (CAD)": 180.0,
+                    "Internet highest (CAD)": 180.0,
+                    "Internet average (CAD)": 180.0,
+                    "Internet error": None,
+                    "Comparable links": "https://example.com/clock",
+                }
+            ],
+            db_path=self.db_path,
+        )
+
+        rows = list_internet_price_report_results(run_id, db_path=self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Item"], "Antique Clock")
+
+    def test_delete_internet_price_run_removes_run_and_results(self):
+        run_id = save_internet_price_report(
+            auction_page_url="https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+            search_keyword="clock",
+            top_items_limit=5,
+            report_rows=[
+                {
+                    "Item": "Antique Clock",
+                    "Auction house": "House B",
+                    "Auction listing URL": "https://www.liveauctionworld.com/item.aspx?i=2001",
+                    "Auction page URL": "https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+                    "Auction status": "Active",
+                    "Auction price (CAD)": 210.0,
+                    "Internet comparable count": 1,
+                    "Internet lowest (CAD)": 180.0,
+                    "Internet highest (CAD)": 180.0,
+                    "Internet average (CAD)": 180.0,
+                    "Internet error": None,
+                    "Comparable links": "https://example.com/clock",
+                }
+            ],
+            db_path=self.db_path,
+        )
+
+        delete_internet_price_run(run_id, db_path=self.db_path)
+
+        runs = list_recent_internet_price_runs(db_path=self.db_path)
+        self.assertEqual(len(runs), 0)
+        rows = list_internet_price_report_results(run_id, db_path=self.db_path)
+        self.assertEqual(len(rows), 0)
+
+    def test_delete_internet_price_run_raises_when_missing(self):
+        with self.assertRaises(ValueError):
+            delete_internet_price_run(9999, db_path=self.db_path)
 
 
 if __name__ == "__main__":

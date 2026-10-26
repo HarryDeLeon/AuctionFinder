@@ -1,5 +1,5 @@
 from datetime import date
-from typing import List, Optional
+from typing import List, Mapping, Optional
 
 from models import AuctionListing
 from pricing import calculate_estimated_cost
@@ -71,3 +71,37 @@ def search_listings(
         key_fn = calculate_estimated_cost
 
     return sorted(filtered, key=key_fn, reverse=sort_desc)
+
+
+def select_top_listings_for_internet_report(
+    listings: List[AuctionListing],
+    keyword: str = "",
+    image_match_distances: Optional[Mapping[str, int]] = None,
+    limit: int = 10,
+) -> List[AuctionListing]:
+    normalized_limit = max(limit, 0)
+    if normalized_limit == 0 or not listings:
+        return []
+
+    image_scores = image_match_distances or {}
+
+    def _listing_key(listing: AuctionListing) -> str:
+        return listing.source_record_id or f"{listing.item}|{listing.auction_house}"
+
+    scored = []
+    for index, listing in enumerate(listings):
+        score = _relevance_score(listing, keyword) * 10
+        listing_key = _listing_key(listing)
+        distance = image_scores.get(listing_key)
+        if distance is not None:
+            score += max(0, 30 - distance) * 2
+        if listing.description.strip():
+            score += 4
+        if listing.image_url:
+            score += 3
+        if listing.listing_url:
+            score += 2
+        scored.append((score, index, listing))
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [row[2] for row in scored[:normalized_limit]]

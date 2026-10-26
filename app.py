@@ -10,16 +10,21 @@ from duplicate_detection import summarize_potential_duplicates
 from image_search import filter_listings_by_image
 from ingestion import run_source_crawl
 from ingestion import run_source_keyword_crawl
+from ingestion import run_source_url_crawl
+from internet_comparables import analyze_listing_internet_prices
 from models import AuctionListing
 from pricing import calculate_price_breakdown
 from repositories import (
     create_source_config,
+    delete_internet_price_run,
     delete_source_config,
     delete_saved_search,
     delete_watchlist_entry,
     export_saved_searches_to_csv,
     export_watchlist_to_csv,
     import_saved_searches_from_csv,
+    list_internet_price_report_results,
+    list_recent_internet_price_runs,
     import_watchlist_from_csv,
     initialize_database,
     list_ingested_listings,
@@ -27,12 +32,14 @@ from repositories import (
     list_saved_searches,
     list_source_configs,
     list_watchlist_entries,
+    save_internet_price_report,
     update_source_config,
     upsert_saved_search,
     upsert_watchlist_entry,
 )
 from sample_data import AUCTIONS
 from search import search_listings
+from search import select_top_listings_for_internet_report
 
 MANUAL_SOURCE_REQUIRED_COLUMNS = [
     "source_record_id",
@@ -198,6 +205,14 @@ if "manual_preview_summary" not in st.session_state:
         "valid": 0,
         "rejected": 0,
     }
+if "auction_scan_url" not in st.session_state:
+    st.session_state["auction_scan_url"] = ""
+if "last_scanned_auction_url" not in st.session_state:
+    st.session_state["last_scanned_auction_url"] = ""
+if "internet_price_report_rows" not in st.session_state:
+    st.session_state["internet_price_report_rows"] = []
+if "internet_price_report_run_id" not in st.session_state:
+    st.session_state["internet_price_report_run_id"] = None
 
 # Search controls
 search = st.text_input(
@@ -364,6 +379,86 @@ if search_action_col1.button("Search web source now"):
 search_action_col2.caption(
     "Runs a live crawl against enabled HTML sources using your criteria and stores matches."
 )
+
+st.subheader("Scan specific auction webpage")
+auction_url_col1, auction_url_col2 = st.columns([3, 1])
+auction_page_url = auction_url_col1.text_input(
+    "Auction webpage URL",
+    placeholder="https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+    key="auction_scan_url",
+)
+top_items_limit = auction_url_col2.number_input(
+    "Top items",
+    min_value=1,
+    max_value=25,
+    value=10,
+    step=1,
+    key="internet_top_items_limit",
+)
+if st.button("Scan auction URL now"):
+    normalized_url = auction_page_url.strip()
+    if not normalized_url:
+        st.error("Enter an auction webpage URL first.")
+    else:
+        available_html_sources = [
+            source
+            for source in list_source_configs()
+            if bool(source["enabled"]) and source["source_type"] == "html"
+        ]
+        if not available_html_sources:
+            try:
+                created_source_id = create_source_config(
+                    name="LiveAuctionWorld",
+                    base_url=HTML_RECOMMENDED_BASE_URL,
+                    source_type="html",
+                    enabled=True,
+                    rate_limit_seconds=2.0,
+                    crawl_max_pages=HTML_RECOMMENDED_MAX_PAGES,
+                    user_agent="AuctionFinderBot/0.1",
+                    search_path_template=HTML_RECOMMENDED_SEARCH_TEMPLATE,
+                    notes="Auto-created from auction URL scan action.",
+                )
+                available_html_sources = [
+                    source
+                    for source in list_source_configs()
+                    if int(source["id"]) == created_source_id
+                ]
+                st.info(
+                    "No enabled HTML source existed. Created a default "
+                    "LiveAuctionWorld source and running it now."
+                )
+            except ValueError as exc:
+                st.error(
+                    "No enabled HTML sources are configured and automatic "
+                    f"source creation failed: {exc}"
+                )
+                available_html_sources = []
+
+        if available_html_sources:
+            selected_source = available_html_sources[0]
+            summary = run_source_url_crawl(
+                source_config_id=int(selected_source["id"]),
+                auction_url=normalized_url,
+            )
+            if summary.status == "success":
+                st.session_state["last_scanned_auction_url"] = normalized_url
+                st.success(
+                    "Auction URL scan complete. "
+                    f"Discovered {summary.discovered_count} item(s); "
+                    f"inserted {summary.inserted_count}, updated {summary.updated_count}."
+                )
+                st.rerun()
+            elif summary.status == "partial":
+                st.warning(
+                    "Auction URL scan completed with partial failures. "
+                    f"Rejected {summary.rejected_count}. "
+                    f"Error: {summary.error_summary}"
+                )
+            else:
+                st.error(
+                    "Auction URL scan failed. "
+                    f"Error: {summary.error_summary}"
+                )
 
 with st.sidebar:
     st.header("Saved searches")
@@ -1190,6 +1285,153 @@ if rows:
 else:
     st.warning(
         "No matching listings. Try changing your search."
+    )
+
+st.subheader("Internet price comparison report")
+st.caption(
+    "Builds internet price comparables for the top-ranked filtered listings "
+    "using listing title/description search results. Price stats are normalized "
+    "to CAD using fixed prototype exchange rates."
+)
+if st.session_state.get("last_scanned_auction_url"):
+    st.caption(
+        "Last scanned auction page: "
+        f"{st.session_state['last_scanned_auction_url']}"
+    )
+
+if filtered:
+    if st.button("Analyze top items on internet"):
+        with st.spinner("Searching internet comparables for top items..."):
+            top_candidates = select_top_listings_for_internet_report(
+                listings=filtered,
+                keyword=search,
+                image_match_distances=image_match_distances,
+                limit=int(top_items_limit),
+            )
+            report_rows = []
+            for listing in top_candidates:
+                summary = analyze_listing_internet_prices(
+                    listing=listing,
+                    max_results=10,
+                )
+                report_rows.append(
+                    {
+                        "Item": listing.item,
+                        "Auction house": listing.auction_house,
+                        "Auction listing URL": listing.listing_url,
+                        "Auction page URL": st.session_state.get(
+                            "last_scanned_auction_url"
+                        )
+                        or auction_page_url.strip()
+                        or listing.listing_url,
+                        "Auction status": listing.status,
+                        "Auction price (CAD)": listing.price_cad,
+                        "Internet comparable count": summary.comparable_count,
+                        "Internet lowest (CAD)": summary.lowest_price_cad,
+                        "Internet highest (CAD)": summary.highest_price_cad,
+                        "Internet average (CAD)": summary.average_price_cad,
+                        "Internet error": summary.error_message,
+                        "Comparable links": "\n".join(
+                            hit.url for hit in summary.hits[:5]
+                        ),
+                    }
+                )
+            st.session_state["internet_price_report_rows"] = report_rows
+            report_auction_url = (
+                st.session_state.get("last_scanned_auction_url")
+                or auction_page_url.strip()
+                or "unknown"
+            )
+            run_id = save_internet_price_report(
+                auction_page_url=report_auction_url,
+                search_keyword=search.strip(),
+                top_items_limit=int(top_items_limit),
+                report_rows=report_rows,
+            )
+            st.session_state["internet_price_report_run_id"] = run_id
+
+recent_internet_runs = list_recent_internet_price_runs(limit=25)
+if recent_internet_runs:
+    run_options = {
+        (
+            f"Run #{row['id']} — {row['created_at']} — "
+            f"{row['auction_page_url']} — top {row['top_items_limit']}"
+        ): int(row["id"])
+        for row in recent_internet_runs
+    }
+    selected_report_label = st.selectbox(
+        "Load previous internet comparison run",
+        options=list(run_options.keys()),
+        key="internet_report_run_select",
+    )
+    run_action_col1, run_action_col2 = st.columns(2)
+    if run_action_col1.button("Load selected run"):
+        run_id = run_options[selected_report_label]
+        loaded_rows = list_internet_price_report_results(run_id)
+        st.session_state["internet_price_report_rows"] = loaded_rows
+        st.session_state["internet_price_report_run_id"] = run_id
+        st.success(f"Loaded run #{run_id}.")
+    if run_action_col2.button("Delete selected run"):
+        run_id = run_options[selected_report_label]
+        try:
+            delete_internet_price_run(run_id)
+            if st.session_state.get("internet_price_report_run_id") == run_id:
+                st.session_state["internet_price_report_rows"] = []
+                st.session_state["internet_price_report_run_id"] = None
+            st.success(f"Deleted run #{run_id}.")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+current_run_id = st.session_state.get("internet_price_report_run_id")
+if current_run_id:
+    st.caption(f"Current report run id: #{current_run_id}")
+
+report_rows = st.session_state.get("internet_price_report_rows", [])
+if report_rows:
+    report_df = pd.DataFrame(report_rows)
+    st.dataframe(
+        report_df[
+            [
+                "Item",
+                "Auction house",
+                "Auction listing URL",
+                "Auction page URL",
+                "Auction status",
+                "Auction price (CAD)",
+                "Internet comparable count",
+                "Internet lowest (CAD)",
+                "Internet highest (CAD)",
+                "Internet average (CAD)",
+                "Internet error",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.download_button(
+        label="Export internet comparison CSV",
+        data=report_df.to_csv(index=False),
+        file_name="internet_price_comparison_report.csv",
+        mime="text/csv",
+    )
+    with st.expander("Internet comparables detail links"):
+        for index, row in enumerate(report_rows, start=1):
+            st.write(
+                f"**{index}. {row.get('Item', 'Unknown item')}** "
+                f"({row.get('Auction house', 'Unknown house')})"
+            )
+            links_text = str(row.get("Comparable links") or "").strip()
+            if not links_text:
+                st.caption("No comparable links captured for this item.")
+                continue
+            for link in links_text.splitlines():
+                normalized_link = link.strip()
+                if normalized_link:
+                    st.write(f"- {normalized_link}")
+else:
+    st.caption(
+        "Run an auction URL scan and click 'Analyze top items on internet' to generate this report."
     )
 
 st.subheader("Watchlist")
