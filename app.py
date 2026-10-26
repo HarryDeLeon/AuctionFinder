@@ -8,9 +8,7 @@ from auction_sources import load_manual_source_csv_preview_with_report
 from comparables import analyze_listing_against_comparables
 from duplicate_detection import summarize_potential_duplicates
 from image_search import filter_listings_by_image
-from ingestion import run_source_crawl
-from ingestion import run_source_keyword_crawl
-from ingestion import run_source_url_crawl
+import ingestion as ingestion_module
 from internet_comparables import analyze_listing_internet_prices
 from models import AuctionListing
 from pricing import calculate_price_breakdown
@@ -40,6 +38,10 @@ from repositories import (
 from sample_data import AUCTIONS
 from search import search_listings
 from search import select_top_listings_for_internet_report
+
+run_source_crawl = ingestion_module.run_source_crawl
+run_source_keyword_crawl = ingestion_module.run_source_keyword_crawl
+run_source_url_crawl = getattr(ingestion_module, "run_source_url_crawl", None)
 
 MANUAL_SOURCE_REQUIRED_COLUMNS = [
     "source_record_id",
@@ -399,6 +401,12 @@ if st.button("Scan auction URL now"):
     normalized_url = auction_page_url.strip()
     if not normalized_url:
         st.error("Enter an auction webpage URL first.")
+    elif run_source_url_crawl is None:
+        st.error(
+            "URL scan is unavailable in this deployment because ingestion "
+            "module does not expose run_source_url_crawl. "
+            "Redeploy with synchronized app.py and ingestion.py."
+        )
     else:
         available_html_sources = [
             source
