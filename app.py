@@ -1207,7 +1207,7 @@ if rows:
     )
 
     st.subheader("Listing details and rationale")
-    for record in detail_records:
+    for record_index, record in enumerate(detail_records):
         listing = record["listing"]
         breakdown = record["breakdown"]
         comparables = record["comparables"]
@@ -1281,7 +1281,10 @@ if rows:
                     st.caption(excluded_charge)
 
             save_button_key = (
-                f"watchlist-save-{listing.item}-{listing.auction_house}"
+                "watchlist-save-"
+                f"{record_index}-"
+                f"{listing.source_record_id or 'no-source-id'}-"
+                f"{listing.listing_url or 'no-url'}"
             )
             if st.button("Save to watchlist", key=save_button_key):
                 upsert_watchlist_entry(
