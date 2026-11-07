@@ -1,7 +1,7 @@
 
 import pandas as pd
 import streamlit as st
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from io import StringIO
 
 from auction_sources import load_manual_source_csv_preview_with_report
@@ -35,7 +35,6 @@ from repositories import (
     upsert_saved_search,
     upsert_watchlist_entry,
 )
-from sample_data import AUCTIONS
 from search import search_listings
 from search import select_top_listings_for_internet_report
 
@@ -70,9 +69,9 @@ MANUAL_SOURCE_TEMPLATE_CSV = (
     "Active,275,22,40,Hand-painted floral vase,Vancouver BC,"
     "https://example.com/listings/demo-1,12,2026-10-25,0,5\n"
 )
-HTML_RECOMMENDED_BASE_URL = "https://www.liveauctionworld.com/auctionlist.aspx"
-HTML_RECOMMENDED_SEARCH_TEMPLATE = "/search.aspx"
-HTML_RECOMMENDED_MAX_PAGES = 2
+HTML_RECOMMENDED_BASE_URL = "https://urbanauctions.ca"
+HTML_RECOMMENDED_SEARCH_TEMPLATE = ""
+HTML_RECOMMENDED_MAX_PAGES = 3
 
 
 def _listing_from_ingested_row(row: dict) -> AuctionListing:
@@ -121,6 +120,15 @@ def _listing_from_ingested_row(row: dict) -> AuctionListing:
         source_record_id=row.get("source_record_id"),
         last_checked_at=last_checked,
     )
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def _load_selected_saved_search(saved_searches: list[dict]) -> None:
@@ -177,15 +185,15 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🏺 Antique Auction Price Finder")
+st.title("Antique auction finder")
 st.write(
-    "Compare antique listings and investigate "
-    "potential bargains across auction houses."
+    "Discover lots, compare estimated costs, and surface high-potential finds "
+    "across auction sources."
 )
 
 st.info(
-    "Prototype mode: sample and ingestion listings are currently "
-    "demonstration data. Live scraping adapters are not connected yet."
+    "Live mode: results are sourced from ingested and imported records only. "
+    "Source crawlers are experimental and should be reviewed before production use."
 )
 
 initialize_database()
@@ -215,17 +223,44 @@ if "internet_price_report_rows" not in st.session_state:
     st.session_state["internet_price_report_rows"] = []
 if "internet_price_report_run_id" not in st.session_state:
     st.session_state["internet_price_report_run_id"] = None
+if "last_scan_source_config_id" not in st.session_state:
+    st.session_state["last_scan_source_config_id"] = None
+if "last_scan_source_record_ids" not in st.session_state:
+    st.session_state["last_scan_source_record_ids"] = []
+if "last_scan_listing_urls" not in st.session_state:
+    st.session_state["last_scan_listing_urls"] = []
+if "show_only_last_scan_results" not in st.session_state:
+    st.session_state["show_only_last_scan_results"] = False
+
+combined_listings = (
+    st.session_state["imported_source_listings"] + ingested_listings
+)
+active_count = sum(1 for listing in combined_listings if listing.status == "Active")
+sold_count = sum(1 for listing in combined_listings if listing.status == "Sold")
+
+summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+summary_col1.metric("Listings in view", len(combined_listings))
+summary_col2.metric("Ingested listings", len(ingested_listings))
+summary_col3.metric("Active lots", active_count)
+summary_col4.metric("Sold lots", sold_count)
+st.caption(
+    "Tip: use URL scan with a target site base URL to discover internal lot pages, "
+    "then refine with search and filters below."
+)
+st.divider()
 
 # Search controls
 search = st.text_input(
-    "Search antiques",
-    placeholder="Try vase, silver, painting...",
+    "Name (optional)",
+    placeholder="Try vase, silver, painting... Leave blank to use category only.",
     key="search_keyword",
 )
 
 all_categories = {
     listing.category
-    for listing in (AUCTIONS + ingested_listings)
+    for listing in (
+        st.session_state["imported_source_listings"] + ingested_listings
+    )
 }
 categories = ["All"] + sorted(all_categories)
 category = st.selectbox(
@@ -297,12 +332,30 @@ sort_desc = sort_col2.checkbox(
     key="sort_desc",
 )
 
+active_criteria = []
+active_criteria.append(f"Name: {search.strip() or 'Any'}")
+active_criteria.append(f"Category: {category}")
+active_criteria.append(f"Status: {status}")
+active_criteria.append(
+    f"Price: {int(min_price_cad)}-{int(max_price_cad_raw) if max_price_cad_raw > 0 else 'No max'} CAD"
+)
+active_criteria.append(f"Sort: {sort_by}{' desc' if sort_desc else ' asc'}")
+if image_criteria_file is not None:
+    active_criteria.append("Image match: enabled")
+
+st.caption("Active criteria")
+st.markdown(
+    " ".join([f":blue-badge[{criterion}]" for criterion in active_criteria])
+)
+
 search_action_col1, search_action_col2 = st.columns(2)
 if search_action_col1.button("Search web source now"):
     normalized_search = search.strip()
+    category_keyword = category.strip() if category != "All" else ""
+    crawl_keyword = normalized_search or category_keyword
     has_image_criteria = image_criteria_file is not None
-    if not normalized_search and not has_image_criteria:
-        st.info("Enter text criteria or upload an image first.")
+    if not crawl_keyword and not has_image_criteria:
+        st.info("Enter a name, choose a category, or upload an image first.")
     else:
         available_html_sources = [
             source
@@ -312,7 +365,7 @@ if search_action_col1.button("Search web source now"):
         if not available_html_sources:
             try:
                 created_source_id = create_source_config(
-                    name="LiveAuctionWorld",
+                    name="Urban Auctions",
                     base_url=HTML_RECOMMENDED_BASE_URL,
                     source_type="html",
                     enabled=True,
@@ -329,7 +382,7 @@ if search_action_col1.button("Search web source now"):
                 ]
                 st.info(
                     "No enabled HTML source existed. "
-                    "Created a default LiveAuctionWorld source and running it now."
+                    "Created a default Urban Auctions source and running it now."
                 )
             except ValueError as exc:
                 st.error(
@@ -338,45 +391,48 @@ if search_action_col1.button("Search web source now"):
                 )
                 available_html_sources = []
         if available_html_sources:
-            total_discovered = 0
-            total_inserted = 0
-            total_updated = 0
-            source_errors = []
-            for source in available_html_sources:
-                if normalized_search:
-                    summary = run_source_keyword_crawl(
-                        source_config_id=int(source["id"]),
-                        keyword=normalized_search,
+            with st.spinner("Searching configured web sources..."):
+                total_discovered = 0
+                total_inserted = 0
+                total_updated = 0
+                source_errors = []
+                for source in available_html_sources:
+                    if crawl_keyword:
+                        summary = run_source_keyword_crawl(
+                            source_config_id=int(source["id"]),
+                            keyword=crawl_keyword,
+                        )
+                    else:
+                        summary = run_source_crawl(
+                            source_config_id=int(source["id"]),
+                        )
+                    total_discovered += summary.discovered_count
+                    total_inserted += summary.inserted_count
+                    total_updated += summary.updated_count
+                    if summary.status != "success" and summary.error_summary:
+                        source_errors.append(
+                            f"{source['name']}: {summary.error_summary}"
+                        )
+
+                if total_discovered > 0:
+                    st.success(
+                        "Web crawl complete. "
+                        f"Matched {total_discovered} item(s); "
+                        f"inserted {total_inserted}, updated {total_updated}."
                     )
+                    if crawl_keyword:
+                        st.caption(f"Applied crawl keyword: '{crawl_keyword}'.")
                 else:
-                    summary = run_source_crawl(
-                        source_config_id=int(source["id"]),
-                    )
-                total_discovered += summary.discovered_count
-                total_inserted += summary.inserted_count
-                total_updated += summary.updated_count
-                if summary.status != "success" and summary.error_summary:
-                    source_errors.append(
-                        f"{source['name']}: {summary.error_summary}"
+                    st.warning(
+                        "Web crawl completed but found no matches for the active criteria. "
+                        "Try increasing max pages in source settings."
                     )
 
-            if total_discovered > 0:
-                st.success(
-                    "Web keyword crawl complete. "
-                    f"Matched {total_discovered} item(s); "
-                    f"inserted {total_inserted}, updated {total_updated}."
-                )
-            else:
-                st.warning(
-                    "Web crawl completed but found no keyword matches. "
-                    "Try increasing max pages in source settings."
-                )
-
-            if source_errors:
-                st.warning("Some sources reported issues:")
-                for source_error in source_errors:
-                    st.caption(f"- {source_error}")
-            st.rerun()
+                if source_errors:
+                    st.warning("Some sources reported issues:")
+                    for source_error in source_errors:
+                        st.caption(f"- {source_error}")
+                st.rerun()
 
 search_action_col2.caption(
     "Runs a live crawl against enabled HTML sources using your criteria and stores matches."
@@ -385,8 +441,8 @@ search_action_col2.caption(
 st.subheader("Scan specific auction webpage")
 auction_url_col1, auction_url_col2 = st.columns([3, 1])
 auction_page_url = auction_url_col1.text_input(
-    "Auction webpage URL",
-    placeholder="https://www.liveauctionworld.com/Fall-Antique-Sale_as555",
+    "Base or auction URL",
+    placeholder="https://urbanauctions.ca",
     key="auction_scan_url",
 )
 top_items_limit = auction_url_col2.number_input(
@@ -399,6 +455,9 @@ top_items_limit = auction_url_col2.number_input(
 )
 if st.button("Scan auction URL now"):
     normalized_url = auction_page_url.strip()
+    normalized_search = search.strip()
+    category_keyword = category.strip() if category != "All" else ""
+    crawl_keyword = normalized_search or category_keyword
     if not normalized_url:
         st.error("Enter an auction webpage URL first.")
     elif run_source_url_crawl is None:
@@ -416,15 +475,15 @@ if st.button("Scan auction URL now"):
         if not available_html_sources:
             try:
                 created_source_id = create_source_config(
-                    name="LiveAuctionWorld",
-                    base_url=HTML_RECOMMENDED_BASE_URL,
+                    name="Generic web source",
+                    base_url=normalized_url,
                     source_type="html",
                     enabled=True,
                     rate_limit_seconds=2.0,
-                    crawl_max_pages=HTML_RECOMMENDED_MAX_PAGES,
+                    crawl_max_pages=3,
                     user_agent="AuctionFinderBot/0.1",
-                    search_path_template=HTML_RECOMMENDED_SEARCH_TEMPLATE,
-                    notes="Auto-created from auction URL scan action.",
+                    search_path_template="",
+                    notes="Auto-created from URL scan action.",
                 )
                 available_html_sources = [
                     source
@@ -432,8 +491,8 @@ if st.button("Scan auction URL now"):
                     if int(source["id"]) == created_source_id
                 ]
                 st.info(
-                    "No enabled HTML source existed. Created a default "
-                    "LiveAuctionWorld source and running it now."
+                    "No enabled HTML source existed. Created a generic "
+                    "HTML source and running it now."
                 )
             except ValueError as exc:
                 st.error(
@@ -444,29 +503,61 @@ if st.button("Scan auction URL now"):
 
         if available_html_sources:
             selected_source = available_html_sources[0]
-            summary = run_source_url_crawl(
-                source_config_id=int(selected_source["id"]),
-                auction_url=normalized_url,
-            )
-            if summary.status == "success":
-                st.session_state["last_scanned_auction_url"] = normalized_url
-                st.success(
-                    "Auction URL scan complete. "
-                    f"Discovered {summary.discovered_count} item(s); "
-                    f"inserted {summary.inserted_count}, updated {summary.updated_count}."
+            with st.spinner("Scanning auction URL and extracting listings..."):
+                scan_started_at = datetime.now(timezone.utc)
+                summary = run_source_url_crawl(
+                    source_config_id=int(selected_source["id"]),
+                    auction_url=normalized_url,
+                    keyword=crawl_keyword or None,
                 )
-                st.rerun()
-            elif summary.status == "partial":
-                st.warning(
-                    "Auction URL scan completed with partial failures. "
-                    f"Rejected {summary.rejected_count}. "
-                    f"Error: {summary.error_summary}"
-                )
-            else:
-                st.error(
-                    "Auction URL scan failed. "
-                    f"Error: {summary.error_summary}"
-                )
+                if summary.status == "success":
+                    scanned_rows = list_ingested_listings(
+                        source_config_id=int(selected_source["id"])
+                    )
+                    recent_rows = []
+                    for row in scanned_rows:
+                        last_seen_at = _parse_iso_datetime(row.get("last_seen_at"))
+                        if last_seen_at and last_seen_at >= scan_started_at:
+                            recent_rows.append(row)
+                    if not recent_rows and summary.discovered_count > 0:
+                        recent_rows = scanned_rows[: summary.discovered_count]
+
+                    st.session_state["last_scan_source_config_id"] = int(
+                        selected_source["id"]
+                    )
+                    st.session_state["last_scan_source_record_ids"] = [
+                        str(row["source_record_id"])
+                        for row in recent_rows
+                        if row.get("source_record_id")
+                    ]
+                    st.session_state["last_scan_listing_urls"] = [
+                        str(row["listing_url"])
+                        for row in recent_rows
+                        if row.get("listing_url")
+                    ]
+                    st.session_state["show_only_last_scan_results"] = True
+                    st.session_state["last_scanned_auction_url"] = normalized_url
+                    st.success(
+                        "URL scan complete. "
+                        f"Discovered {summary.discovered_count} item(s); "
+                        f"inserted {summary.inserted_count}, updated {summary.updated_count}."
+                    )
+                    if crawl_keyword:
+                        st.caption(
+                            f"Keyword filter applied during crawl: '{crawl_keyword}'."
+                        )
+                    st.rerun()
+                elif summary.status == "partial":
+                    st.warning(
+                        "Auction URL scan completed with partial failures. "
+                        f"Rejected {summary.rejected_count}. "
+                        f"Error: {summary.error_summary}"
+                    )
+                else:
+                    st.error(
+                        "Auction URL scan failed. "
+                        f"Error: {summary.error_summary}"
+                    )
 
 with st.sidebar:
     st.header("Saved searches")
@@ -547,7 +638,7 @@ with st.sidebar:
         default_base_url = (
             HTML_RECOMMENDED_BASE_URL
             if add_source_type == "html"
-            else "https://www.liveauctionworld.com/"
+            else "https://example.com/"
         )
         default_search_template = (
             HTML_RECOMMENDED_SEARCH_TEMPLATE
@@ -561,7 +652,7 @@ with st.sidebar:
         )
         add_name = st.text_input(
             "Source name",
-            value="LiveAuctionWorld",
+            value="Urban Auctions",
         )
         add_base_url = st.text_input(
             "Base URL",
@@ -592,7 +683,7 @@ with st.sidebar:
         if add_source_type == "html":
             st.caption(
                 "Recommended HTML source defaults applied: "
-                "auction list base URL, /search.aspx template, and max pages = 2."
+                "urbanauctions.ca base URL, empty search template, and max pages = 3."
             )
         add_notes = st.text_area("Notes", value="")
         add_submit = st.form_submit_button("Add source")
@@ -719,9 +810,9 @@ with st.sidebar:
             )
             if edit_source_type == "html":
                 st.caption(
-                    "Tip: for LiveAuctionWorld HTML sources, use "
-                    "https://www.liveauctionworld.com/auctionlist.aspx, "
-                    "search template /search.aspx, and max pages around 2-3."
+                    "Tip: for Urban Auctions HTML sources, use "
+                    "https://urbanauctions.ca with an empty search template "
+                    "and max pages around 3-5."
                 )
             edit_save_col, edit_defaults_col = st.columns(2)
             edit_submit = edit_save_col.form_submit_button("Save source changes")
@@ -1020,8 +1111,7 @@ with st.sidebar:
 min_price = min_price_cad if min_price_cad > 0 else None
 max_price = max_price_cad_raw if max_price_cad_raw > 0 else None
 all_listings = (
-    AUCTIONS
-    + st.session_state["imported_source_listings"]
+    st.session_state["imported_source_listings"]
     + ingested_listings
 )
 
@@ -1085,11 +1175,46 @@ if image_criteria_file is not None:
     else:
         filtered = image_filtered
 
+last_scan_record_ids = set(
+    st.session_state.get("last_scan_source_record_ids") or []
+)
+last_scan_listing_urls = set(
+    st.session_state.get("last_scan_listing_urls") or []
+)
+
+
+def _is_from_last_url_scan(listing: AuctionListing) -> bool:
+    if listing.source_record_id and listing.source_record_id in last_scan_record_ids:
+        return True
+    if listing.listing_url and listing.listing_url in last_scan_listing_urls:
+        return True
+    return False
+
+
+scan_mode_available = bool(last_scan_record_ids or last_scan_listing_urls)
+show_scan_only = bool(st.session_state.get("show_only_last_scan_results", False))
+if scan_mode_available:
+    show_scan_only = st.checkbox(
+        "Show only latest URL scan results",
+        value=show_scan_only,
+        key="show_only_last_scan_results",
+        help=(
+            "When enabled, Matching listings and the table are limited to "
+            "items discovered/updated by the most recent 'Scan auction URL now' run."
+        ),
+    )
+
+display_filtered = filtered
+if scan_mode_available and show_scan_only:
+    display_filtered = [
+        listing for listing in filtered if _is_from_last_url_scan(listing)
+    ]
+
 # Prepare the comparison table and detail records
 rows = []
 detail_records = []
 
-for listing in filtered:
+for listing in display_filtered:
     breakdown = calculate_price_breakdown(listing)
     comparables = analyze_listing_against_comparables(
         listing, all_listings
@@ -1164,7 +1289,12 @@ if st.session_state["imported_source_listings"]:
 
 col1, col2 = st.columns(2)
 
-col1.metric("Matching listings", len(rows))
+matching_label = (
+    "Matching listings (latest scan)"
+    if scan_mode_available and show_scan_only
+    else "Matching listings"
+)
+col1.metric(matching_label, len(rows))
 
 if rows:
     df = pd.DataFrame(rows)
@@ -1300,7 +1430,8 @@ else:
 
 st.subheader("Internet price comparison report")
 st.caption(
-    "Builds internet price comparables for the top-ranked filtered listings "
+    "Builds internet price comparables for scanned auction listings first, "
+    "or top-ranked filtered listings when no URL scan context is available. "
     "using listing title/description search results. Price stats are normalized "
     "to CAD using fixed prototype exchange rates."
 )
@@ -1309,57 +1440,82 @@ if st.session_state.get("last_scanned_auction_url"):
         "Last scanned auction page: "
         f"{st.session_state['last_scanned_auction_url']}"
     )
+scan_filtered_listings = [
+    listing for listing in filtered if _is_from_last_url_scan(listing)
+]
 
 if filtered:
-    if st.button("Analyze top items on internet"):
-        with st.spinner("Searching internet comparables for top items..."):
-            top_candidates = select_top_listings_for_internet_report(
-                listings=filtered,
-                keyword=search,
-                image_match_distances=image_match_distances,
-                limit=int(top_items_limit),
-            )
-            report_rows = []
-            for listing in top_candidates:
-                summary = analyze_listing_internet_prices(
-                    listing=listing,
-                    max_results=10,
+    if scan_mode_available:
+        st.caption(
+            f"{len(scan_filtered_listings)} scanned item(s) currently match your filters. "
+            "This analysis runs internet comparisons for each matching scanned item."
+        )
+
+    analyze_button_label = (
+        "Analyze scanned items on internet"
+        if scan_mode_available
+        else "Analyze top items on internet"
+    )
+    if st.button(analyze_button_label):
+        with st.spinner("Searching internet comparables for selected items..."):
+            if scan_mode_available:
+                top_candidates = scan_filtered_listings
+            else:
+                top_candidates = select_top_listings_for_internet_report(
+                    listings=filtered,
+                    keyword=search,
+                    image_match_distances=image_match_distances,
+                    limit=int(top_items_limit),
                 )
-                report_rows.append(
-                    {
-                        "Item": listing.item,
-                        "Auction house": listing.auction_house,
-                        "Auction listing URL": listing.listing_url,
-                        "Auction page URL": st.session_state.get(
-                            "last_scanned_auction_url"
-                        )
-                        or auction_page_url.strip()
-                        or listing.listing_url,
-                        "Auction status": listing.status,
-                        "Auction price (CAD)": listing.price_cad,
-                        "Internet comparable count": summary.comparable_count,
-                        "Internet lowest (CAD)": summary.lowest_price_cad,
-                        "Internet highest (CAD)": summary.highest_price_cad,
-                        "Internet average (CAD)": summary.average_price_cad,
-                        "Internet error": summary.error_message,
-                        "Comparable links": "\n".join(
-                            hit.url for hit in summary.hits[:5]
-                        ),
-                    }
+            if not top_candidates:
+                st.warning(
+                    "No scanned listings match the current filters. "
+                    "Adjust filters or run a new auction URL scan."
                 )
-            st.session_state["internet_price_report_rows"] = report_rows
-            report_auction_url = (
-                st.session_state.get("last_scanned_auction_url")
-                or auction_page_url.strip()
-                or "unknown"
-            )
-            run_id = save_internet_price_report(
-                auction_page_url=report_auction_url,
-                search_keyword=search.strip(),
-                top_items_limit=int(top_items_limit),
-                report_rows=report_rows,
-            )
-            st.session_state["internet_price_report_run_id"] = run_id
+                st.session_state["internet_price_report_rows"] = []
+                st.session_state["internet_price_report_run_id"] = None
+            else:
+                report_rows = []
+                for listing in top_candidates:
+                    summary = analyze_listing_internet_prices(
+                        listing=listing,
+                        max_results=10,
+                    )
+                    report_rows.append(
+                        {
+                            "Item": listing.item,
+                            "Auction house": listing.auction_house,
+                            "Auction listing URL": listing.listing_url,
+                            "Auction page URL": st.session_state.get(
+                                "last_scanned_auction_url"
+                            )
+                            or auction_page_url.strip()
+                            or listing.listing_url,
+                            "Auction status": listing.status,
+                            "Auction price (CAD)": listing.price_cad,
+                            "Internet comparable count": summary.comparable_count,
+                            "Internet lowest (CAD)": summary.lowest_price_cad,
+                            "Internet highest (CAD)": summary.highest_price_cad,
+                            "Internet average (CAD)": summary.average_price_cad,
+                            "Internet error": summary.error_message,
+                            "Comparable links": "\n".join(
+                                hit.url for hit in summary.hits[:5]
+                            ),
+                        }
+                    )
+                st.session_state["internet_price_report_rows"] = report_rows
+                report_auction_url = (
+                    st.session_state.get("last_scanned_auction_url")
+                    or auction_page_url.strip()
+                    or "unknown"
+                )
+                run_id = save_internet_price_report(
+                    auction_page_url=report_auction_url,
+                    search_keyword=search.strip(),
+                    top_items_limit=len(top_candidates),
+                    report_rows=report_rows,
+                )
+                st.session_state["internet_price_report_run_id"] = run_id
 
 recent_internet_runs = list_recent_internet_price_runs(limit=25)
 if recent_internet_runs:
@@ -1442,7 +1598,7 @@ if report_rows:
                     st.write(f"- {normalized_link}")
 else:
     st.caption(
-        "Run an auction URL scan and click 'Analyze top items on internet' to generate this report."
+        "Run an auction URL scan and click 'Analyze scanned items on internet' to generate this report."
     )
 
 st.subheader("Watchlist")

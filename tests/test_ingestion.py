@@ -170,6 +170,50 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(summary.status, "success")
         self.assertEqual(summary.discovered_count, 1)
 
+    def test_url_crawl_passes_keyword_when_supported(self):
+        class UrlKeywordAdapter:
+            def crawl_latest(self, source_config):
+                return []
+
+            def crawl_url(self, source_config, auction_url, keyword=None):
+                item_name = keyword or "no keyword"
+                return [
+                    AuctionListing(
+                        item=f"{item_name} result",
+                        category="Auction lot",
+                        auction_house="Generic",
+                        status="Active",
+                        price_cad=0.0,
+                        buyer_premium_percent=0.0,
+                        shipping_cad=0.0,
+                        description="url crawl match",
+                        listing_url=auction_url,
+                        source_name="Generic",
+                        source_record_id="url-keyword-1",
+                    )
+                ]
+
+        original_adapter = ADAPTER_REGISTRY["html"]
+        ADAPTER_REGISTRY["html"] = UrlKeywordAdapter()
+        try:
+            source_id = create_source_config(
+                name="Generic",
+                base_url="https://example.com",
+                source_type="html",
+                db_path=self.db_path,
+            )
+            summary = run_source_url_crawl(
+                source_id,
+                auction_url="https://example.com/auctions",
+                keyword="vase",
+                db_path=self.db_path,
+            )
+        finally:
+            ADAPTER_REGISTRY["html"] = original_adapter
+
+        self.assertEqual(summary.status, "success")
+        self.assertEqual(summary.discovered_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

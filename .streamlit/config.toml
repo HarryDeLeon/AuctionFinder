@@ -4,3 +4,25 @@ port = 8501
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1D4ED8"
+backgroundColor = "#F3F8FF"
+secondaryBackgroundColor = "#E6F0FF"
+textColor = "#0A2540"
+linkColor = "#1E40AF"
+font = "Nunito:https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap"
+baseRadius = "0.75rem"
+showWidgetBorder = true
+paddingTop = "1.1rem"
+paddingBottom = "1.0rem"
+chartCategoricalColors = ["#1D4ED8", "#2563EB", "#3B82F6", "#60A5FA", "#0EA5E9", "#0284C7", "#38BDF8"]
+chartSequentialColors = ["#EFF6FF", "#DBEAFE", "#BFDBFE", "#93C5FD", "#60A5FA", "#3B82F6", "#2563EB", "#1D4ED8", "#1E3A8A", "#172554"]
+
+[theme.sidebar]
+backgroundColor = "#0E2A47"
+secondaryBackgroundColor = "#12375D"
+textColor = "#E3F2FF"
+linkColor = "#93C5FD"
+primaryColor = "#60A5FA"

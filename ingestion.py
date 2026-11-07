@@ -97,7 +97,17 @@ def _run_source_crawl_internal(
 
     try:
         if auction_url and hasattr(adapter, "crawl_url"):
-            listings = adapter.crawl_url(source_config, auction_url)
+            if keyword:
+                try:
+                    listings = adapter.crawl_url(
+                        source_config,
+                        auction_url,
+                        keyword=keyword,
+                    )
+                except TypeError:
+                    listings = adapter.crawl_url(source_config, auction_url)
+            else:
+                listings = adapter.crawl_url(source_config, auction_url)
         elif keyword and hasattr(adapter, "crawl_keyword"):
             listings = adapter.crawl_keyword(source_config, keyword)
         else:
@@ -177,14 +187,16 @@ def run_source_keyword_crawl(
 def run_source_url_crawl(
     source_config_id: int,
     auction_url: str,
+    keyword: Optional[str] = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> CrawlSummary:
     normalized = auction_url.strip()
     if not normalized:
         raise ValueError("Auction URL is required for source URL crawl.")
+    normalized_keyword = keyword.strip() if keyword else None
     return _run_source_crawl_internal(
         source_config_id=source_config_id,
-        keyword=None,
+        keyword=normalized_keyword,
         auction_url=normalized,
         db_path=db_path,
     )

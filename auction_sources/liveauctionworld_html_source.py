@@ -5,7 +5,7 @@ import time
 from html import unescape
 from typing import Dict, Iterable, List
 from urllib.error import URLError
-from urllib.parse import quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from models import AuctionListing
@@ -59,6 +59,305 @@ def _extract_bid_fields(text: str) -> tuple[float | None, float | None]:
 def _record_id_from_url_or_title(url: str, title: str) -> str:
     key = (url.strip() or title.strip()).encode("utf-8")
     return hashlib.sha1(key).hexdigest()[:16]
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    cleaned = parsed._replace(fragment="")
+    normalized = cleaned.geturl()
+    if normalized.endswith("/") and cleaned.path not in {"", "/"}:
+        normalized = normalized.rstrip("/")
+    return normalized
+
+
+_BLOCKED_FILE_EXTENSIONS = {
+    ".css",
+    ".js",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".pdf",
+    ".zip",
+    ".xml",
+}
+
+_DEFAULT_INCLUDE_TERMS = [
+    "item",
+    "lot",
+    "auction",
+    "catalog",
+    "listing",
+    "product",
+    "sale",
+    "bid",
+]
+
+_DEFAULT_EXCLUDE_TERMS = [
+    "login",
+    "logout",
+    "register",
+    "signup",
+    "account",
+    "privacy",
+    "terms",
+    "help",
+    "contact",
+    "about",
+    "faq",
+    "wishlist",
+    "cart",
+    "checkout",
+    "shipping",
+    "returns",
+    "policy",
+]
+
+_SITE_PROFILES: Dict[str, Dict[str, List[str] | int]] = {
+    "liveauctionworld.com": {
+        "include_terms": ["_i", "_as", "auction", "lot", "item", "search"],
+        "exclude_terms": _DEFAULT_EXCLUDE_TERMS,
+        "title_min_length": 8,
+    },
+    "hibid.com": {
+        "include_terms": ["lotdetails", "auction", "lot", "item"],
+        "exclude_terms": _DEFAULT_EXCLUDE_TERMS + ["auctioncalendar", "auctionmap"],
+        "title_min_length": 10,
+    },
+    "invaluable.com": {
+        "include_terms": ["auction-lot", "lot", "item", "catalog"],
+        "exclude_terms": _DEFAULT_EXCLUDE_TERMS,
+        "title_min_length": 10,
+    },
+    "proxibid.com": {
+        "include_terms": ["lotinformation", "lotdetails", "lot", "auction"],
+        "exclude_terms": _DEFAULT_EXCLUDE_TERMS,
+        "title_min_length": 10,
+    },
+    "urbanauctions.ca": {
+        "include_terms": ["event/lotdetails", "lotdetails", "lot", "item"],
+        "exclude_terms": _DEFAULT_EXCLUDE_TERMS + ["event/details"],
+        "title_min_length": 8,
+    },
+}
+
+
+def _site_profile_for_host(hostname: str) -> Dict[str, List[str] | int]:
+    lowered = hostname.lower()
+    for domain, profile in _SITE_PROFILES.items():
+        if lowered == domain or lowered.endswith(f".{domain}"):
+            return profile
+    return {
+        "include_terms": _DEFAULT_INCLUDE_TERMS,
+        "exclude_terms": _DEFAULT_EXCLUDE_TERMS,
+        "title_min_length": 10,
+    }
+
+
+def _path_has_blocked_extension(path: str) -> bool:
+    lowered = path.lower().split("?", 1)[0].split("#", 1)[0]
+    return any(lowered.endswith(ext) for ext in _BLOCKED_FILE_EXTENSIONS)
+
+
+def _looks_like_item_candidate(
+    path_and_query: str,
+    include_terms: List[str],
+) -> bool:
+    if any(term in path_and_query for term in include_terms):
+        return True
+    if re.search(r"(?:^|[/?&=_-])(lot|item|product|listing)\d+", path_and_query):
+        return True
+    if re.search(r"(?:lotdetails|lot|item)[/-]\d{3,}", path_and_query):
+        return True
+    return bool(re.search(r"[_-](?:i|lot|item)\d+", path_and_query))
+
+
+def _looks_like_event_index_url(path_and_query: str) -> bool:
+    lowered = path_and_query.lower()
+    if "event/lotdetails" in lowered:
+        return False
+    return "event/details" in lowered
+
+
+def _anchor_context_window(html_text: str, start_index: int, end_index: int) -> str:
+    context_start = max(start_index - 180, 0)
+    context_end = min(end_index + 180, len(html_text))
+    return _clean_text(html_text[context_start:context_end])
+
+
+def _extract_internal_links(
+    html_text: str,
+    current_url: str,
+    root_host: str,
+    max_links: int,
+) -> List[str]:
+    href_pattern = re.compile(
+        r"<a[^>]+href=[\"']([^\"']+)[\"']",
+        re.IGNORECASE,
+    )
+    profile = _site_profile_for_host(root_host)
+    include_terms = list(profile.get("include_terms") or _DEFAULT_INCLUDE_TERMS)
+    exclude_terms = list(profile.get("exclude_terms") or _DEFAULT_EXCLUDE_TERMS)
+
+    links_with_score: List[tuple[int, str]] = []
+    seen = set()
+    for href in href_pattern.findall(html_text):
+        href_value = href.strip()
+        if not href_value:
+            continue
+        if href_value.startswith("#"):
+            continue
+        lowered = href_value.lower()
+        if lowered.startswith("javascript:") or lowered.startswith("mailto:"):
+            continue
+
+        absolute = _normalize_url(urljoin(current_url, href_value))
+        if not absolute:
+            continue
+        parsed = urlparse(absolute)
+        if (parsed.hostname or "").lower() != root_host:
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+
+        path_and_query = f"{parsed.path} {parsed.query}".lower()
+        if _path_has_blocked_extension(parsed.path):
+            continue
+        if any(term in path_and_query for term in exclude_terms):
+            continue
+
+        has_page_marker = bool(re.search(r"[_?&]p\d+|page=\d+", path_and_query))
+        is_item_candidate = _looks_like_item_candidate(path_and_query, include_terms)
+        if not has_page_marker and not is_item_candidate:
+            continue
+        if is_item_candidate and _looks_like_event_index_url(path_and_query):
+            continue
+
+        score = 0
+        if has_page_marker:
+            score += 6
+        if is_item_candidate:
+            score += 3
+        if "lotdetails" in path_and_query:
+            score += 6
+        if _looks_like_event_index_url(path_and_query):
+            score -= 4
+        if parsed.query:
+            score += 1
+        if re.search(r"\d{4,}", path_and_query):
+            score += 2
+
+        links_with_score.append((score, absolute))
+
+    links_with_score.sort(key=lambda pair: (-pair[0], pair[1]))
+    ranked_links = [url for _, url in links_with_score]
+    return ranked_links[: max(max_links, 1)]
+
+
+def _extract_generic_anchor_items(
+    html_text: str,
+    source_name: str,
+    base_url: str,
+    root_host: str,
+) -> List[AuctionListing]:
+    anchor_pattern = re.compile(
+        r"<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    profile = _site_profile_for_host(root_host)
+    include_terms = list(profile.get("include_terms") or _DEFAULT_INCLUDE_TERMS)
+    exclude_terms = list(profile.get("exclude_terms") or _DEFAULT_EXCLUDE_TERMS)
+    title_min_length = int(profile.get("title_min_length") or 10)
+
+    skip_titles = {
+        "home",
+        "about",
+        "contact",
+        "login",
+        "register",
+        "next",
+        "previous",
+        "privacy",
+        "terms",
+        "help",
+    }
+    results: List[AuctionListing] = []
+    seen_record_ids = set()
+    for match in anchor_pattern.finditer(html_text):
+        href = match.group(1).strip()
+        title = _clean_text(match.group(2))
+        if not href or len(title) < title_min_length:
+            continue
+        if title.lower() in skip_titles:
+            continue
+
+        listing_url = _normalize_url(urljoin(base_url, href))
+        if not listing_url:
+            continue
+        listing_parsed = urlparse(listing_url)
+        if (listing_parsed.hostname or "").lower() != root_host:
+            continue
+
+        path_and_query = f"{listing_parsed.path} {listing_parsed.query}".lower()
+        if _path_has_blocked_extension(listing_parsed.path):
+            continue
+        if any(term in path_and_query for term in exclude_terms):
+            continue
+
+        context_text = _anchor_context_window(html_text, match.start(), match.end())
+        has_item_path = _looks_like_item_candidate(path_and_query, include_terms)
+        if has_item_path and _looks_like_event_index_url(path_and_query):
+            continue
+        has_item_context = bool(
+            re.search(r"\b(lot|item|bid|estimate|auction|sold|current bid|opening bid)\b", context_text.lower())
+        )
+        has_price = bool(re.search(r"(?:\$|cad|usd|eur|gbp)\s*\d", context_text.lower()))
+        if not has_item_path and not has_item_context and not has_price:
+            continue
+
+        source_record_id = _record_id_from_url_or_title(listing_url, title)
+        if source_record_id in seen_record_ids:
+            continue
+        seen_record_ids.add(source_record_id)
+
+        price_cad = _safe_float(context_text)
+        status = _status_from_text(context_text)
+
+        results.append(
+            AuctionListing(
+                item=title,
+                category="Web listing",
+                auction_house=source_name,
+                status=status,
+                price_cad=max(price_cad, 0.0),
+                buyer_premium_percent=0.0,
+                shipping_cad=0.0,
+                description=context_text,
+                listing_url=listing_url,
+                source_name=source_name,
+                source_record_id=source_record_id,
+            )
+        )
+    return results
+
+
+def _filter_listings_by_keyword(
+    listings: List[AuctionListing],
+    keyword: str,
+) -> List[AuctionListing]:
+    normalized = keyword.strip().lower()
+    if not normalized:
+        return listings
+    return [
+        listing
+        for listing in listings
+        if normalized in f"{listing.item} {listing.description}".lower()
+    ]
 
 
 def _iter_json_blocks(data: object) -> Iterable[Dict[str, object]]:
@@ -597,22 +896,21 @@ class LiveAuctionWorldHtmlAdapter:
             template = f"{template}{connector}txtSearch={quote_plus(keyword)}"
         return urljoin(base_url, template)
 
-    def _validate_supported_domain(self, url: str) -> None:
-        parsed = urlparse(url)
-        hostname = (parsed.hostname or "").lower()
-        if "liveauctionworld.com" not in hostname:
-            raise ValueError(
-                "LiveAuctionWorld HTML adapter only supports liveauctionworld.com URLs."
-            )
-
     def _crawl_from_url(
         self,
         source_config: Dict[str, object],
         crawl_url: str,
+        keyword: str | None = None,
     ) -> List[AuctionListing]:
         base_url = str(source_config["base_url"]).strip()
-        self._validate_supported_domain(base_url)
-        self._validate_supported_domain(crawl_url)
+        normalized_start_url = _normalize_url(crawl_url)
+        if not normalized_start_url:
+            raise ValueError("A valid http/https URL is required for crawl.")
+
+        start_parsed = urlparse(normalized_start_url)
+        root_host = (start_parsed.hostname or "").lower()
+        if not root_host:
+            raise ValueError("Crawl URL must include a valid hostname.")
 
         user_agent = (
             str(source_config.get("user_agent") or "").strip()
@@ -623,79 +921,87 @@ class LiveAuctionWorldHtmlAdapter:
         max_pages = max(int(source_config.get("crawl_max_pages") or 1), 1)
         source_name = str(source_config["name"])
 
-        first_html = self._fetch_page(
-            page_url=crawl_url,
-            user_agent=user_agent,
-            timeout_seconds=timeout_seconds,
-            rate_limit_seconds=rate_limit_seconds,
-        )
-
         results: List[AuctionListing] = []
         seen_ids = set()
 
-        initial_listings = parse_liveauctionworld_html(
-            html_text=first_html,
-            source_name=source_name,
-            base_url=base_url,
-        )
-        for listing in initial_listings:
-            if listing.source_record_id in seen_ids:
-                continue
-            seen_ids.add(listing.source_record_id)
-            results.append(listing)
+        queue: List[str] = [normalized_start_url]
+        queued_urls = {normalized_start_url}
+        crawled_urls = set()
 
-        pagination_links = extract_liveauctionworld_pagination_links(first_html, base_url)
-        pages_crawled = 1
-        for page_url in pagination_links:
-            if pages_crawled >= max_pages:
-                break
-            if page_url == crawl_url:
+        pages_crawled = 0
+        while queue and pages_crawled < max_pages:
+            page_url = queue.pop(0)
+            if page_url in crawled_urls:
                 continue
+
             page_html = self._fetch_page(
                 page_url=page_url,
                 user_agent=user_agent,
                 timeout_seconds=timeout_seconds,
                 rate_limit_seconds=rate_limit_seconds,
             )
+            crawled_urls.add(page_url)
+            pages_crawled += 1
+
             page_listings = parse_liveauctionworld_html(
                 html_text=page_html,
                 source_name=source_name,
-                base_url=base_url,
+                base_url=page_url,
             )
+            if not page_listings:
+                page_listings = _extract_generic_anchor_items(
+                    html_text=page_html,
+                    source_name=source_name,
+                    base_url=page_url,
+                    root_host=root_host,
+                )
+
             for listing in page_listings:
                 if listing.source_record_id in seen_ids:
                     continue
                 seen_ids.add(listing.source_record_id)
                 results.append(listing)
-            pages_crawled += 1
 
-        auction_links = extract_liveauctionworld_auction_links(first_html, base_url)
-        for auction_url in auction_links[:max_pages]:
-            if pages_crawled >= max_pages:
-                break
-            if auction_url == crawl_url:
-                continue
-            auction_html = self._fetch_page(
-                page_url=auction_url,
-                user_agent=user_agent,
-                timeout_seconds=timeout_seconds,
-                rate_limit_seconds=rate_limit_seconds,
+            candidate_links: List[str] = []
+            candidate_links.extend(
+                extract_liveauctionworld_pagination_links(page_html, page_url)
             )
-            auction_listings = parse_liveauctionworld_html(
-                html_text=auction_html,
-                source_name=source_name,
-                base_url=base_url,
+            candidate_links.extend(
+                extract_liveauctionworld_auction_links(page_html, page_url)
             )
-            for listing in auction_listings:
-                if listing.source_record_id in seen_ids:
+            candidate_links.extend(
+                _extract_internal_links(
+                    html_text=page_html,
+                    current_url=page_url,
+                    root_host=root_host,
+                    max_links=max_pages * 8,
+                )
+            )
+
+            for candidate in candidate_links:
+                normalized_candidate = _normalize_url(candidate)
+                if not normalized_candidate:
                     continue
-                seen_ids.add(listing.source_record_id)
-                results.append(listing)
-            pages_crawled += 1
+                if normalized_candidate in queued_urls:
+                    continue
+                if normalized_candidate in crawled_urls:
+                    continue
+                candidate_host = (urlparse(normalized_candidate).hostname or "").lower()
+                if candidate_host != root_host:
+                    continue
+                queued_urls.add(normalized_candidate)
+                queue.append(normalized_candidate)
+
+        if keyword:
+            results = _filter_listings_by_keyword(results, keyword)
+            if not results:
+                raise ValueError(
+                    "URL crawl completed but found no items matching the keyword filter."
+                )
 
         if not results:
             raise ValueError(
-                "No listing records could be parsed from the fetched HTML."
+                "No listing records could be parsed from the fetched HTML pages."
             )
         return results
 
@@ -756,12 +1062,14 @@ class LiveAuctionWorldHtmlAdapter:
         return self._crawl_from_url(
             source_config=source_config,
             crawl_url=crawl_url,
+            keyword=keyword,
         )
 
     def crawl_url(
         self,
         source_config: Dict[str, object],
         auction_url: str,
+        keyword: str | None = None,
     ) -> List[AuctionListing]:
         normalized_url = auction_url.strip()
         if not normalized_url:
@@ -769,6 +1077,7 @@ class LiveAuctionWorldHtmlAdapter:
         return self._crawl_from_url(
             source_config=source_config,
             crawl_url=normalized_url,
+            keyword=keyword,
         )
 
     def crawl_keyword(
@@ -780,6 +1089,16 @@ class LiveAuctionWorldHtmlAdapter:
         if not normalized_keyword:
             raise ValueError("Keyword is required for keyword crawl.")
         base_url = str(source_config["base_url"]).strip()
+        base_host = (urlparse(base_url).hostname or "").lower()
+        if "liveauctionworld.com" not in base_host:
+            # Generic sites use URL crawl plus keyword filtering instead of
+            # the LiveAuctionWorld-specific JSON endpoint.
+            return self._crawl_from_url(
+                source_config=source_config,
+                crawl_url=base_url,
+                keyword=keyword,
+            )
+
         user_agent = (
             str(source_config.get("user_agent") or "").strip()
             or "AuctionFinderBot/0.1"
@@ -788,6 +1107,11 @@ class LiveAuctionWorldHtmlAdapter:
         timeout_seconds = max(rate_limit_seconds * 5, 10.0)
         max_pages = max(int(source_config.get("crawl_max_pages") or 1), 1)
         source_name = str(source_config["name"])
+        base_query = parse_qs(urlparse(base_url).query)
+        configured_site_id = str(source_config.get("site_id") or "").strip()
+        query_site_id = configured_site_id or (
+            (base_query.get("siteID") or base_query.get("siteId") or [""])[0].strip()
+        )
 
         all_results: List[AuctionListing] = []
         seen_ids = set()
@@ -798,7 +1122,6 @@ class LiveAuctionWorldHtmlAdapter:
                 "page": page_number,
                 "isCurrent": 1,
                 "keywords": keyword,
-                "siteID": 6,
                 "categoryID": "",
                 "auctionSessionTypeID": "",
                 "countryLocationID": "",
@@ -810,6 +1133,8 @@ class LiveAuctionWorldHtmlAdapter:
                 "searchFields": 0,
                 "hasImage": 0,
             }
+            if query_site_id:
+                query_params["siteID"] = query_site_id
             query_string = urlencode(query_params)
             endpoint = urljoin(
                 base_url,

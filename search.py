@@ -74,7 +74,7 @@ def search_listings(
 
 
 def select_top_listings_for_internet_report(
-    listings: List[AuctionListing],
+    listings: List[AuctionListing], 
     keyword: str = "",
     image_match_distances: Optional[Mapping[str, int]] = None,
     limit: int = 10,
